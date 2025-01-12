@@ -1,0 +1,17 @@
+[package]
+name = "wasm-bind"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = "thin"
+
+[dependencies]
+js-sys = "0.3"
+ts-rs = "10.1"
+log = "0.4"
+console_log = "1.0"
