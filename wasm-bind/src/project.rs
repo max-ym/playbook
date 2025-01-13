@@ -69,10 +69,10 @@ pub struct JsProject {
 #[wasm_bindgen(js_class = Project)]
 impl JsProject {
     /// Get the files in the project. Note that some of the files can be declared
-    /// but not actually loaded into the memory. This may be the case if the file is
+    /// but contents not actually loaded into the memory. This may be the case if the file is
     /// still being loaded or if the user has no permission to load the file content.
-    /// However, this list will contain all files that the project has as long as
-    /// the user has permission to view the project at least read-only.
+    /// However, this list will contain all files that the project has with associated metadata
+    /// as long as the user has permission to view the project at least read-only.
     #[wasm_bindgen(getter, js_name = files)]
     pub fn get_files(&self) -> Vec<JsProjectFile> {
         let ws = work_session::work_session().read().unwrap();
@@ -116,6 +116,8 @@ impl JsProject {
     }
 
     /// Load the project with the given identifier, as returned by listing request.
+    /// 
+    /// This will throw ProjectLoadError if the project cannot be loaded.
     pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
         todo!()
     }
@@ -282,6 +284,7 @@ impl JsNodePin {
     }
 
     /// Get the errors that this pin is associated with.
+    #[wasm_bindgen(getter)]
     pub fn errors(&self) -> Vec<JsNodePinError> {
         todo!()
     }
@@ -340,7 +343,7 @@ impl JsPeekFlow {
     /// Shuffle and get the array of unique values, up to the given limit.
     /// Array will have less elements if the flow does not have enough unique values.
     #[wasm_bindgen(js_name = shuffled)]
-    pub fn shuffled(limit: usize) -> Vec<JsFlowValue> {
+    pub fn shuffled(&self, limit: usize) -> Vec<JsFlowValue> {
         todo!()
     }
 }
@@ -457,11 +460,15 @@ impl JsProjectFile {
     }
 
     /// Load the file into the memory from the server.
+    /// This will throw FileLoadError if the file fails to be loaded.
     pub async fn load(&self) -> Result<(), FileLoadError> {
         todo!()
     }
 
     /// Remove the file from the associated project.
+    /// This will throw PermissionError if the user does not have permission to delete the file.
+    /// Drop is effective on project commit. Note that this does not remove
+    /// the file from previous commits.
     pub fn drop(&self) -> Result<(), PermissionError> {
         todo!()
     }
@@ -622,6 +629,8 @@ impl JsFileBuilder {
 
     /// Build the file with the configured properties into the given project.
     /// FileBuilder handle should not be used after this call (it is consumed).
+    /// 
+    /// Throws FileBuilderError if the file cannot be built.
     #[wasm_bindgen(js_name = buildInto)]
     pub fn build_into(self, project: JsProject) -> Result<JsProjectFile, JsFileBuilderError> {
         let missing_name = self.name.is_none();
