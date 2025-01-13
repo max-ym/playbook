@@ -194,7 +194,7 @@ pub struct JsNodeIter {
 
 /// Node pin. This is a connection point on a node.
 #[derive(Debug)]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = NodePin)]
 pub struct JsNodePin {
     project_uuid: Uuid,
     node_id: base::canvas::Id,
@@ -483,16 +483,19 @@ pub struct JsProtect {
 #[wasm_bindgen(js_class = Protect)]
 impl JsProtect {
     /// Protection level for reading the resource.
+    #[wasm_bindgen(getter)]
     pub fn read(&self) -> ProtectLevel {
         self.read
     }
 
     /// Protection level for writing to the resource.
+    #[wasm_bindgen(getter)]
     pub fn write(&self) -> ProtectLevel {
         self.write
     }
 
     /// Protection level for deleting the resource.
+    #[wasm_bindgen(getter)]
     pub fn delete(&self) -> ProtectLevel {
         self.write
     }

@@ -100,7 +100,7 @@ impl WorkSessionProject {
 #[wasm_bindgen(js_name = WorkSession)]
 pub struct JsWorkSession;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = WorkSession)]
 impl JsWorkSession {
     pub fn get() -> Result<Self, JsWorkSessionUninitError> {
         // TODO
@@ -112,7 +112,7 @@ impl JsWorkSession {
 #[wasm_bindgen(js_name = History)]
 pub struct JsHistory;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = History)]
 impl JsHistory {
     /// Undo the last change in current project.
     /// Returns the undone change in the history stack.
