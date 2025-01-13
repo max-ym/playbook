@@ -195,7 +195,12 @@ pub struct JsNodeIter {
 /// Node pin. This is a connection point on a node.
 #[derive(Debug)]
 #[wasm_bindgen]
-pub struct JsNodePin {}
+pub struct JsNodePin {
+    project_uuid: Uuid,
+    node_id: base::canvas::Id,
+    ordinal: u32,
+    is_output: bool,
+}
 
 #[wasm_bindgen(js_class = NodePin)]
 impl JsNodePin {
@@ -212,7 +217,7 @@ impl JsNodePin {
     /// Whether the pin is an output pin.
     #[wasm_bindgen(getter)]
     pub fn is_output(&self) -> bool {
-        todo!()
+        self.is_output
     }
 
     /// Whether the pin accepts optional values.
@@ -224,7 +229,7 @@ impl JsNodePin {
     /// Get the position of the pin on the node.
     #[wasm_bindgen(getter)]
     pub fn ordinal(&self) -> u32 {
-        todo!()
+        self.ordinal
     }
 
     /// Get the node that this pin is connected to. Null if not connected.
