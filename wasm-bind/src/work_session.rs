@@ -151,6 +151,18 @@ impl JsHistory {
         let project = ws.current_project_mut();
         project.goto(pos)
     }
+
+    /// Get the change at a specific position in the history stack.
+    /// If the position is out of bounds, returns `undefined`.
+    pub fn change_at(&self, pos: usize) -> Option<JsChangeItem> {
+        let ws = work_session().read().expect(WORK_SESSION_POISONED);
+        let project = ws.current_project();
+        project.change_at(pos).map(|change| JsChangeItem {
+            timestamp: change.micros_since_unix() as u64,
+            position: pos,
+            project_uuid: project.uuid(),
+        })
+    }
 }
 
 /// A change in the project. This defines the operation that was performed, and that
