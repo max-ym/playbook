@@ -6,35 +6,11 @@ pub mod work_session;
 
 pub mod project;
 
-// #[derive(Debug)]
-// pub enum JsResult<T: Into<JsValue>, E: Into<JsValue>> {
-//     Ok(T),
-//     Err(E),
-// }
-
-// #[wasm_bindgen(js_name = Result)]
-// pub struct JsResultExported {
-//     /// This will be undefined if the result is an ok.
-//     err: JsValue,
-
-//     /// This will be undefined if the result is error.
-//     ok: JsValue,
-// }
-
-// impl<T: Into<JsValue>, E: Into<JsValue>> From<JsResult<T, E>> for JsResultExported {
-//     fn from(result: JsResult<T, E>) -> Self {
-//         match result {
-//             JsResult::Ok(ok) => Self {
-//                 err: JsValue::undefined(),
-//                 ok: ok.into(),
-//             },
-//             JsResult::Err(err) => Self {
-//                 err: err.into(),
-//                 ok: JsValue::undefined(),
-//             },
-//         }
-//     }
-// }
+/// To use with `expect` method on operations on `RwLock` of `WorkSession`.
+/// This should never happen, but if it does, it means that the WASM code panicked
+/// and the session is in an invalid state.
+const WORK_SESSION_POISONED: &str =
+    "work session is poisoned (unexpected crash happened in WASM), reload required";
 
 /// String representation that can be used in both Rust and JS.
 /// It prevents unnecessary conversions between Rust and JS strings, as those
@@ -180,9 +156,13 @@ pub enum TypeReconstructionError {
 
 impl TypeReconstructionError {
     pub fn ensure_string(js: JsValue) -> Result<JsString, TypeReconstructionError> {
-        js.dyn_into().map_err(|_| TypeReconstructionError::InvalidType("String"))
+        js.dyn_into()
+            .map_err(|_| TypeReconstructionError::InvalidType("String"))
     }
 }
+
+#[wasm_bindgen]
+pub struct InvalidHandleError;
 
 trait MyUuid {
     fn into_js_array(self) -> js_sys::Uint8Array;

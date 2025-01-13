@@ -1,10 +1,11 @@
 use std::sync::{OnceLock, RwLock};
+use std::time::UNIX_EPOCH;
 
 use smallvec::SmallVec;
 use uuid::Uuid;
-use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::project::Project;
+use crate::*;
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
@@ -23,11 +24,6 @@ pub struct WorkSession {
     on_state_change: Option<js_sys::Function>,
 }
 
-struct WorkSessionProject {
-    project: Project,
-    changes: ChangeStack,
-}
-
 unsafe impl Send for WorkSession {}
 unsafe impl Sync for WorkSession {}
 
@@ -38,18 +34,6 @@ impl WorkSession {
             current_project_idx: 0,
             on_state_change: None,
         }
-    }
-
-    pub fn undo(&mut self) -> bool {
-        todo!()
-    }
-
-    pub fn redo(&mut self) -> bool {
-        todo!()
-    }
-
-    pub fn goto(&self, pos: usize) -> bool {
-        todo!()
     }
 
     pub fn project_by_id_mut(&mut self, uuid: Uuid) -> Option<&mut crate::project::Project> {
@@ -65,6 +49,51 @@ impl WorkSession {
             .find(|p| p.project.uuid() == uuid)
             .map(|p| &p.project)
     }
+
+    pub fn current_project(&self) -> &WorkSessionProject {
+        &self.projects[self.current_project_idx]
+    }
+
+    pub fn current_project_mut(&mut self) -> &mut WorkSessionProject {
+        &mut self.projects[self.current_project_idx]
+    }
+}
+
+struct WorkSessionProject {
+    project: Project,
+    changes: ChangeStack,
+}
+
+impl WorkSessionProject {
+    /// Undo the last change.
+    /// Returns the position of the undone change in the history stack.
+    /// If there are no changes to undo, returns `None`.
+    pub fn undo(&mut self) -> Option<usize> {
+        todo!()
+    }
+
+    /// Redo the last undone change.
+    /// Returns the position of the redone change in the history stack.
+    /// If there are no changes to redo, returns `None`.
+    pub fn redo(&mut self) -> Option<usize> {
+        todo!()
+    }
+
+    /// Go to a specific change.
+    /// Where 0 is the first change after the initial state.
+    /// Returns the position starting from which the changes were undone or redone (position before
+    /// the change). If the passed position is out of bounds, this is no-op and returns `None`.
+    pub fn goto(&mut self, pos: usize) -> Option<usize> {
+        todo!()
+    }
+
+    pub fn change_at(&self, pos: usize) -> Option<&ChangeItem> {
+        self.changes.stack.get(pos)
+    }
+
+    pub fn uuid(&self) -> Uuid {
+        self.project.uuid()
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -74,7 +103,8 @@ pub struct JsWorkSession;
 #[wasm_bindgen]
 impl JsWorkSession {
     pub fn get() -> Result<Self, JsWorkSessionUninitError> {
-        todo!()
+        // TODO
+        Ok(Self)
     }
 }
 
@@ -84,20 +114,92 @@ pub struct JsHistory;
 
 #[wasm_bindgen]
 impl JsHistory {
-    /// Undo the last change.
-    pub fn undo(&self) -> bool {
-        work_session().write().unwrap().undo()
+    /// Undo the last change in current project.
+    /// Returns the undone change in the history stack.
+    /// If there are no changes to undo, returns `null`.
+    pub fn undo(&self) -> Option<JsChangeItem> {
+        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let project = ws.current_project_mut();
+        let position = project.undo()?;
+        project.change_at(position).map(|change| JsChangeItem {
+            timestamp: change.micros_since_unix() as u64,
+            position,
+            project_uuid: project.uuid(),
+        })
     }
 
-    /// Redo the last undone change.
-    pub fn redo(&self) -> bool {
-        work_session().write().unwrap().redo()
+    /// Redo the last undone change in current project.
+    /// Returns the redone change in the history stack.
+    /// If there are no changes to redo, returns `null`.
+    pub fn redo(&self) -> Option<JsChangeItem> {
+        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let project = ws.current_project_mut();
+        let position = project.redo()?;
+        project.change_at(position).map(|change| JsChangeItem {
+            timestamp: change.micros_since_unix() as u64,
+            position,
+            project_uuid: project.uuid(),
+        })
     }
 
-    /// Go to a specific change. Where 0 is the first change after the initial state.
-    pub fn goto(&self, pos: usize) -> bool {
-        work_session().write().unwrap().goto(pos)
+    /// Go to a specific change in current project. 
+    /// Where 0 is the first change after the initial state.
+    /// Returns the position starting from which the changes were undone or redone (position before
+    /// the change). If the passed position is out of bounds, this is no-op and returns `null`.
+    pub fn goto(&self, pos: usize) -> Option<usize> {
+        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let project = ws.current_project_mut();
+        project.goto(pos)
     }
+}
+
+/// A change in the project. This defines the operation that was performed, and that
+/// can be undone or redone.
+#[derive(Debug)]
+#[wasm_bindgen(js_name = ChangeItem)]
+pub struct JsChangeItem {
+    /// Timestamp of the change.
+    #[wasm_bindgen(readonly)]
+    pub timestamp: u64,
+
+    /// Position of the change in the history stack.
+    /// This together with the timestamp can be used to uniquely identify a change.
+    ///
+    /// During execution, if it so happens that this position points to a different
+    /// change (identifiable by the timestamp), this means that the history stack
+    /// was modified in the meantime. Then this handle is invalid and further operations
+    /// on it will result in an error.
+    position: usize,
+
+    project_uuid: Uuid,
+}
+
+#[wasm_bindgen(js_class = ChangeItem)]
+impl JsChangeItem {
+    /// Check if the change handle is still valid.
+    ///
+    /// During execution, the history stack can get modified. Then this handle can get invalid if
+    /// the corresponding change is overwritten, so further operations
+    /// on it will result in an error.
+    #[wasm_bindgen(getter, js_name = isValid)]
+    pub fn is_valid(&self) -> bool {
+        todo!()
+    }
+
+    /// Get the operation that was performed.
+    /// This information is necessary to reflect the change in the UI.
+    /// If the handle is invalid, this will return an error.
+    pub fn operation(&self) -> Result<JsChangeOp, InvalidHandleError> {
+        todo!()
+    }
+}
+
+/// Change operation that was performed on the project with related data. This
+/// information is necessary to reflect the change in the UI.
+#[derive(Debug)]
+#[wasm_bindgen(js_name = ChangeOp)]
+pub struct JsChangeOp {
+    // TODO
 }
 
 /// Error when trying to access an uninitialized or incorrectly initialized work session.
@@ -125,8 +227,15 @@ impl ChangeStack {
 }
 
 pub struct ChangeItem {
-    timestamp: std::time::Instant,
+    timestamp: std::time::SystemTime,
     op: ChangeOp,
+}
+
+impl ChangeItem {
+    /// Get the timestamp of the change in microseconds since UNIX epoch.
+    pub fn micros_since_unix(&self) -> u128 {
+        self.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default().as_micros()
+    }
 }
 
 pub enum ChangeOp {}
