@@ -1,22 +1,31 @@
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
-use serde_json::Value as JsonValue;
-use tokio::sync::RwLock;
+use smallvec::SmallVec;
+use uuid::Uuid;
 use wasm_bindgen::prelude::wasm_bindgen;
+
+use crate::project::Project;
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
-fn work_session() -> &'static RwLock<WorkSession> {
-    unsafe {
-        WORK_SESSION.get_or_init(|| RwLock::new(WorkSession::new()));
-        WORK_SESSION.get().unwrap_unchecked()
-    }
+pub fn work_session() -> &'static RwLock<WorkSession> {
+    WORK_SESSION.get_or_init(|| RwLock::new(WorkSession::new()));
+    WORK_SESSION.get().unwrap()
 }
 
 pub struct WorkSession {
-    canvas: base::canvas::Canvas<JsonValue>,
-    changes: ChangeStack,
+    /// Loaded projects.
+    projects: SmallVec<[WorkSessionProject; 1]>,
+
+    /// Index of the current project in the `projects` vector.
+    current_project_idx: usize,
+
     on_state_change: Option<js_sys::Function>,
+}
+
+struct WorkSessionProject {
+    project: Project,
+    changes: ChangeStack,
 }
 
 unsafe impl Send for WorkSession {}
@@ -25,8 +34,8 @@ unsafe impl Sync for WorkSession {}
 impl WorkSession {
     pub fn new() -> Self {
         Self {
-            canvas: base::canvas::Canvas::new(),
-            changes: ChangeStack::new(),
+            projects: SmallVec::new(),
+            current_project_idx: 0,
             on_state_change: None,
         }
     }
@@ -42,6 +51,20 @@ impl WorkSession {
     pub fn goto(&self, pos: usize) -> bool {
         todo!()
     }
+
+    pub fn project_by_id_mut(&mut self, uuid: Uuid) -> Option<&mut crate::project::Project> {
+        self.projects
+            .iter_mut()
+            .find(|p| p.project.uuid() == uuid)
+            .map(|p| &mut p.project)
+    }
+
+    pub fn project_by_id(&self, uuid: Uuid) -> Option<&crate::project::Project> {
+        self.projects
+            .iter()
+            .find(|p| p.project.uuid() == uuid)
+            .map(|p| &p.project)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -50,25 +73,10 @@ pub struct JsWorkSession;
 
 #[wasm_bindgen]
 impl JsWorkSession {
-    pub fn get() -> Result<Self, Self> {
-        todo!()
-    }
-
-    pub fn history(&self) -> JsHistory {
-        JsHistory
-    }
-
-    pub fn canvas(&self) -> JsCanvas {
+    pub fn get() -> Result<Self, JsWorkSessionUninitError> {
         todo!()
     }
 }
-
-#[derive(Debug, Copy, Clone)]
-#[wasm_bindgen(js_name = Canvas)]
-pub struct JsCanvas;
-
-#[wasm_bindgen]
-impl JsCanvas {}
 
 #[derive(Debug, Copy, Clone)]
 #[wasm_bindgen(js_name = History)]
@@ -76,26 +84,32 @@ pub struct JsHistory;
 
 #[wasm_bindgen]
 impl JsHistory {
-    pub async fn undo(&self) -> bool {
-        work_session().write().await.undo()
+    /// Undo the last change.
+    pub fn undo(&self) -> bool {
+        work_session().write().unwrap().undo()
     }
 
-    pub async fn redo(&self) -> bool {
-        work_session().write().await.redo()
+    /// Redo the last undone change.
+    pub fn redo(&self) -> bool {
+        work_session().write().unwrap().redo()
     }
 
-    pub async fn goto(&self, pos: usize) -> bool {
-        work_session().write().await.goto(pos)
+    /// Go to a specific change. Where 0 is the first change after the initial state.
+    pub fn goto(&self, pos: usize) -> bool {
+        work_session().write().unwrap().goto(pos)
     }
 }
 
+/// Error when trying to access an uninitialized or incorrectly initialized work session.
 #[wasm_bindgen(js_name = WorkSessionUninitError)]
 pub struct JsWorkSessionUninitError {
+    /// Work session to use with possibly invalid state.
     #[wasm_bindgen(js_name = workSession)]
     pub work_session: JsWorkSession,
     // TODO more
 }
 
+/// Stack of changes made to a project. This allows to undo and redo changes.
 pub struct ChangeStack {
     stack: Vec<ChangeItem>,
     pos: usize,

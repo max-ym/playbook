@@ -1,14 +1,327 @@
 use base::table_data;
-use js_sys::{Int8Array, Object};
+use js_sys::Uint8Array;
 use smallvec::SmallVec;
+use uuid::Uuid;
+
+use serde_json::Value as JsonValue;
 
 use crate::*;
 
 pub struct Project {
     name: InterString,
-
+    canvas: base::canvas::Canvas<JsonValue>,
     data: SmallVec<[table_data::Table; 1]>,
     files: SmallVec<[File; 1]>,
+    uuid: Uuid,
+}
+
+impl Project {
+    pub fn name(&self) -> &InterString {
+        &self.name
+    }
+
+    pub fn data(&self) -> &[table_data::Table] {
+        &self.data
+    }
+
+    pub fn files(&self) -> &[File] {
+        &self.files
+    }
+
+    pub fn file_by_id(&self, uuid: Uuid) -> Option<&File> {
+        self.files.iter().find(|file| file.uuid() == uuid)
+    }
+
+    /// Add a file to the project. Returns the UUID of the file in this project.
+    pub fn add_file(&mut self, mut file: File) -> Uuid {
+        // We retry 10 times to generate a unique UUID for the file.
+        // If we still fail, we panic.
+        for _ in 0..10 {
+            let uuid = Uuid::new_v4();
+            if self.files.iter().all(|f| f.uuid() != uuid) {
+                file.uuid = uuid;
+                self.files.push(file);
+                return uuid;
+            }
+        }
+        panic!("Failed to generate a unique UUID for the file");
+    }
+
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    pub fn canvas(&self) -> &base::canvas::Canvas<JsonValue> {
+        &self.canvas
+    }
+
+    pub fn canvas_mut(&mut self) -> &mut base::canvas::Canvas<JsonValue> {
+        &mut self.canvas
+    }
+}
+
+/// A project handle that can be used to access project data from the current work session.
+#[wasm_bindgen(js_name = Project)]
+pub struct JsProject {
+    uuid: Uuid,
+}
+
+#[wasm_bindgen(js_class = Project)]
+impl JsProject {
+    #[wasm_bindgen(getter, js_name = getFiles)]
+    pub fn get_files(&self) -> Vec<JsProjectFile> {
+        let ws = work_session::work_session().read().unwrap();
+
+        let project = if let Some(project) = ws.project_by_id(self.uuid) {
+            project
+        } else {
+            // Project not found. Was removed from work session. This handle is invalid.
+            // We return no files.
+            return Vec::new();
+        };
+
+        project
+            .files()
+            .iter()
+            .map(|file| JsProjectFile {
+                name: file.name().to_js(),
+                uuid: file.uuid().into_js_array(),
+                project_uuid: Some(project.uuid()),
+                is_loaded: file.bytes().is_some(),
+                can_load: file.can_load(),
+                protect: JsProtect::from(file.protect()),
+            })
+            .collect()
+    }
+
+    #[wasm_bindgen(getter, js_name = getName)]
+    pub fn get_name(&self) -> JsString {
+        let ws = work_session::work_session().read().unwrap();
+        let project = ws.project_by_id(self.uuid).unwrap();
+        project.name().to_js()
+    }
+
+    #[wasm_bindgen(setter, js_name = setName)]
+    pub fn set_name(&mut self, name: JsString) {
+        let mut ws = work_session::work_session().write().unwrap();
+        let project = ws.project_by_id_mut(self.uuid).unwrap();
+        project.name.set_js(name);
+    }
+
+    pub fn load() -> Result<JsProject, ProjectLoadError> {
+        todo!()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn canvas(&mut self) -> JsCanvas {
+        JsCanvas { project_uuid: self.uuid }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = ProjectLoadError)]
+pub enum ProjectLoadError {
+    NotFound,
+    PermissionError,
+    RequestError,
+    ServerError,
+}
+
+#[derive(Debug, Copy, Clone)]
+#[wasm_bindgen(js_name = Canvas)]
+pub struct JsCanvas {
+    project_uuid: Uuid,
+}
+
+#[wasm_bindgen(js_class = Canvas)]
+impl JsCanvas {
+    #[wasm_bindgen(js_name = addNode)]
+    pub fn add_node(&mut self, node: JsNodeStub) -> JsNode {
+        todo!()
+    }
+
+    #[wasm_bindgen(js_name = nodeIterator)]
+    pub fn node_iter(&self) -> JsNodeIter {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = NodeStub)]
+pub struct JsNodeStub {
+
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Node)]
+pub struct JsNode {
+    project_uuid: Uuid,
+    node_id: base::canvas::Id,
+}
+
+#[wasm_bindgen(js_class = Node)]
+impl JsNode {
+    #[wasm_bindgen(js_name = stub)]
+    pub fn stub(&self) -> JsNodeStub {
+        todo!()
+    }
+
+    pub fn outAt(&self, position: u32) -> Option<JsNodePin> {
+        todo!()
+    }
+
+    pub fn inAt(&self, position: u32) -> Option<JsNodePin> {
+        todo!()
+    }
+
+    pub fn id(&self) -> u32 {
+        self.node_id.get()
+    }
+
+    pub fn drop(self) -> JsNodeStub {
+        todo!()
+    }
+}
+
+/// Node iterator to fetch nodes from the canvas. This exists so to avoid
+/// duplicating big arrays of nodes in memory.
+#[derive(Debug)]
+#[wasm_bindgen(js_name = NodeIter)]
+pub struct JsNodeIter {
+    project_uuid: Uuid,
+    pos: usize,
+}
+
+/// Node pin. This is a connection point on a node.
+#[derive(Debug)]
+#[wasm_bindgen]
+pub struct JsNodePin {}
+
+#[wasm_bindgen(js_class = NodePin)]
+impl JsNodePin {
+    /// Get the data type of the pin.
+    /// If the pin has unknown data type, this will return `null`.
+    /// If the pin has nested data type, this will return an array of data types, where
+    /// the first element is the outermost data type.
+    /// Normal data type will return a single element array.
+    #[wasm_bindgen(getter, js_name = dataType)]
+    pub fn data_type(&self) -> Option<Vec<JsDataType>> {
+        todo!()
+    }
+
+    /// Whether the pin is an output pin.
+    #[wasm_bindgen(getter)]
+    pub fn is_output(&self) -> bool {
+        todo!()
+    }
+
+    /// Whether the pin accepts optional values.
+    #[wasm_bindgen(getter, js_name = isNullable)]
+    pub fn is_nullable(&self) -> bool {
+        todo!()
+    }
+
+    /// Get the position of the pin on the node.
+    #[wasm_bindgen(getter)]
+    pub fn ordinal(&self) -> u32 {
+        todo!()
+    }
+
+    /// Get the node that this pin is connected to. Null if not connected.
+    #[wasm_bindgen(js_name = connectedTo)]
+    pub fn connected_to(&self) -> Option<JsNodePin> {
+        todo!()
+    }
+
+    #[wasm_bindgen(js_name = peekInto)]
+    pub fn peek_into(&self) -> JsPeekFlow {
+        todo!()
+    }
+
+    pub fn errors(&self) -> Vec<JsNodePinError> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[wasm_bindgen(js_name = DataTypeKind)]
+pub enum JsDataTypeKind {
+    Int,
+    Uint,
+    Unit,
+    Moneraty,
+    Date,
+    DateTime,
+    Time,
+    Bool,
+    Str,
+    Ordering,
+    File,
+    Record,
+    Array,
+    Predicate,
+    Result,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = DataType)]
+pub struct JsDataType {
+    /// The kind of the data type.
+    #[wasm_bindgen(readonly)]
+    pub kind: JsDataTypeKind,
+
+    /// Whether this data type is optional or required.
+    #[wasm_bindgen(readonly, js_name = isNullable)]
+    pub is_nullable: bool,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = PeekFlow)]
+pub struct JsPeekFlow {
+
+}
+
+#[wasm_bindgen(js_class = PeekFlow)]
+impl JsPeekFlow {
+    /// Get the data type of the values in this flow.
+    #[wasm_bindgen(js_name = dataType)]
+    pub fn data_type(&self) -> JsDataType {
+        todo!()
+    }
+
+    /// Shuffle and get the array of values, up to the given limit.
+    /// Array will have less elements if the flow does not have enough unique values.
+    #[wasm_bindgen(js_name = shuffled)]
+    pub fn shuffled(limit: usize) -> Vec<JsFlowValue> {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = NodePinError)]
+pub struct JsNodePinError {
+
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = FlowValue)]
+pub struct JsFlowValue {
+
+}
+
+#[wasm_bindgen(js_class = FlowValue)]
+impl JsFlowValue {
+    /// How many times this value repeats.
+    #[wasm_bindgen(getter)]
+    pub fn count(&self) -> usize {
+        todo!()
+    }
+
+    /// The value itself.
+    #[wasm_bindgen(getter)]
+    pub fn value(&self) -> JsValue {
+        todo!()
+    }
 }
 
 pub struct File {
@@ -21,6 +334,8 @@ pub struct File {
     can_load: bool,
 
     protect: Protect,
+
+    uuid: Uuid,
 }
 
 impl File {
@@ -39,35 +354,91 @@ impl File {
     pub fn protect(&self) -> Protect {
         self.protect
     }
+
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
 }
 
 #[derive(Debug)]
-#[wasm_bindgen(js_name = File)]
-pub struct JsFile {
+#[wasm_bindgen(js_name = ProjectFile)]
+pub struct JsProjectFile {
+    /// File name. This is the original name selected by the user.
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub name: JsString,
 
-    #[wasm_bindgen(readonly)]
-    pub id: i32,
+    /// UUID of the file.
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub uuid: Uint8Array,
 
+    /// UUID of the project that this file belongs to.
+    /// If this is `None`, the file is not associated with any project.
+    project_uuid: Option<Uuid>,
+
+    /// Whether the file is loaded into the memory.
     is_loaded: bool,
+
+    /// Whether the file can be loaded into the memory.
     can_load: bool,
 
+    /// Protection levels for the file.
     #[wasm_bindgen(readonly)]
     pub protect: JsProtect,
 }
 
-#[wasm_bindgen]
-impl JsFile {
+#[wasm_bindgen(js_class = ProjectFile)]
+impl JsProjectFile {
+    /// Whether the file can be loaded into the memory.
+    /// This is `true` if the file is already loaded. Even if
+    /// the file is not stored on the server, this will be `true` as long
+    /// as it remains in the memory.
     #[wasm_bindgen(getter = canLoad)]
     pub fn can_load(&self) -> bool {
-        self.can_load
+        if self.project_uuid.is_none() {
+            false
+        } else {
+            self.can_load
+        }
     }
 
+    /// Whether the file is loaded into the memory.
     #[wasm_bindgen(getter = isLoaded)]
     pub fn is_loaded(&self) -> bool {
-        self.is_loaded
+        if self.project_uuid.is_none() {
+            false
+        } else {
+            self.is_loaded
+        }
     }
+
+    /// Load the file into the memory from the server.
+    pub async fn load(&self) -> Result<(), FileLoadError> {
+        todo!()
+    }
+
+    /// Remove the file from the associated project.
+    pub fn drop(&self) -> Result<(), PermissionError> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[wasm_bindgen(js_name = FileLoadError)]
+pub enum FileLoadError {
+    /// File was dropped from the project and cannot be loaded.
+    Dropped,
+
+    /// File is not stored on the server.
+    NotStored,
+
+    /// Insufficient permissions to load the file content.
+    InsufficientPermissions,
+
+    /// Server failed to respond.
+    ServerError,
+
+    /// Request failed to be sent.
+    RequestError,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -98,22 +469,25 @@ impl Protect {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = Protect)]
 pub struct JsProtect {
     read: ProtectLevel,
     write: ProtectLevel,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = Protect)]
 impl JsProtect {
+    /// Protection level for reading the resource.
     pub fn read(&self) -> ProtectLevel {
         self.read
     }
 
+    /// Protection level for writing to the resource.
     pub fn write(&self) -> ProtectLevel {
         self.write
     }
 
+    /// Protection level for deleting the resource.
     pub fn delete(&self) -> ProtectLevel {
         self.write
     }
@@ -150,87 +524,141 @@ pub struct FileBuilder {
     name: InterString,
     protect_read: ProtectLevel,
     protect_delete: ProtectLevel,
-    bytes: Int8Array,
-}
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_name = FileBuilder)]
-    pub type JsFileBuilder;
-}
-
-macro_rules! get {
-    ($val:ident, $name:expr) => {{
-        wasm_bindgen::intern($name);
-        let js_str = &JsString::from($name);
-        if let Some(val) = Object::try_from(&$val) {
-            let val = Object::get_own_property_descriptor(&val, js_str);
-            if val.is_undefined() {
-                Err(TypeReconstructionError::MissingField($name))
-            } else {
-                Ok(val)
-            }
-        } else {
-            Err(TypeReconstructionError::InvalidType($name))
-        }
-    }};
-}
-
-macro_rules! intern_str {
-    ($name:expr) => {{
-        wasm_bindgen::intern($name);
-        JsString::from($name)
-    }};
+    bytes: Uint8Array,
 }
 
 impl FileBuilder {
-    pub fn from_js(obj: JsFileBuilder) -> Result<Self, TypeReconstructionError> {
-        let name = TypeReconstructionError::ensure_string(get!(obj, "name")?)?;
-        let protect_read = TypeReconstructionError::ensure_string(get!(obj, "protectRead")?)?;
-        let protect_delete = TypeReconstructionError::ensure_string(get!(obj, "protectDelete")?)?;
-        let bytes = get!(obj, "bytes")?;
-
-        let relax = intern_str!("relax");
-        let higher_rank = intern_str!("higherRank");
-
-        let protect_read = if protect_read == relax {
-            ProtectLevel::Relax
-        } else if protect_read == higher_rank {
-            ProtectLevel::HigherRank
-        } else {
-            return Err(TypeReconstructionError::InvalidType("protectRead"));
-        };
-
-        let protect_delete = if protect_delete == relax {
-            ProtectLevel::Relax
-        } else if protect_delete == higher_rank {
-            ProtectLevel::HigherRank
-        } else {
-            return Err(TypeReconstructionError::InvalidType("protectDelete"));
-        };
-
-        if name.length() > 255 {
-            return Err(TypeReconstructionError::InvalidType("name"));
-        }
-
-        Ok(Self {
-            name: InterString::new_js(name),
-            protect_read,
-            protect_delete,
-            bytes: bytes
-                .dyn_into()
-                .map_err(|_| TypeReconstructionError::InvalidType("ArrayBuffer"))?,
-        })
+    pub fn protect(&self) -> Protect {
+        Protect::new(self.protect_read, self.protect_delete)
     }
+}
+
+#[wasm_bindgen(js_name = FileBuilder)]
+pub struct JsFileBuilder {
+    /// File name. This is the original name selected by the user.
+    /// Normally, it is set when the file is being uploaded, but can be changed
+    /// before actually saving the file to a project.
+    #[wasm_bindgen(getter_with_clone)]
+    pub name: Option<JsString>,
+
+    /// Protection level for reading the file.
+    #[wasm_bindgen(js_name = protectRead)]
+    pub protect_read: Option<ProtectLevel>,
+
+    /// Protection level for deleting the file.
+    #[wasm_bindgen(js_name = protectDelete)]
+    pub protect_delete: Option<ProtectLevel>,
+
+    /// File contents as a JS byte array.
+    bytes: Option<Uint8Array>,
+}
+
+#[wasm_bindgen(js_class = FileBuilder)]
+impl JsFileBuilder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            protect_read: None,
+            protect_delete: None,
+            bytes: None,
+        }
+    }
+
+    /// Set the file contents from a JS file object.
+    #[wasm_bindgen(setter, js_name = setFile)]
+    pub fn set_file(&mut self, file: crate::File) {
+        self.name = Some(file.name());
+        self.bytes = Some(file.bytes());
+    }
+
+    /// Build the file with the configured properties into the given project.
+    /// FileBuilder handle should not be used after this call (it is consumed).
+    #[wasm_bindgen(js_name = buildInto)]
+    pub fn build_into(self, project: JsProject) -> Result<JsProjectFile, JsFileBuilderError> {
+        let missing_name = self.name.is_none();
+        let missing_protect_read = self.protect_read.is_none();
+        let missing_protect_delete = self.protect_delete.is_none();
+        let missing_bytes = self.bytes.is_none();
+
+        let any_error =
+            missing_name || missing_bytes || missing_protect_read || missing_protect_delete;
+
+        let mut ws = work_session::work_session().write().unwrap();
+        let project = ws.project_by_id_mut(project.uuid);
+        if let Some(project) = project {
+            if any_error {
+                Err(JsFileBuilderError {
+                    missing_name,
+                    missing_bytes,
+                    missing_protect_read,
+                    missing_protect_delete,
+                    project_not_found: false,
+                })
+            } else {
+                let builder = FileBuilder {
+                    name: self.name.clone().unwrap().into(),
+                    protect_read: self.protect_read.unwrap(),
+                    protect_delete: self.protect_delete.unwrap(),
+                    bytes: self.bytes.unwrap(),
+                };
+                let protect = builder.protect();
+                let uuid = project.add_file(builder.into());
+                let js_file = JsProjectFile {
+                    name: self.name.unwrap(),
+                    uuid: uuid.into_js_array(),
+                    project_uuid: Some(project.uuid()),
+                    is_loaded: true,
+                    can_load: false,
+                    protect: JsProtect::from(protect),
+                };
+                Ok(js_file)
+            }
+        } else {
+            Err(JsFileBuilderError {
+                missing_name,
+                missing_bytes,
+                missing_protect_read,
+                missing_protect_delete,
+                project_not_found: true,
+            })
+        }
+    }
+}
+
+#[wasm_bindgen(js_name = FileBuilderError)]
+pub struct JsFileBuilderError {
+    /// Whether the file name is missing.
+    #[wasm_bindgen(readonly, js_name = missingName)]
+    pub missing_name: bool,
+
+    /// Whether the file contents are missing.
+    #[wasm_bindgen(readonly, js_name = missingBytes)]
+    pub missing_bytes: bool,
+
+    /// Whether the protection level for reading the file is missing.
+    #[wasm_bindgen(readonly, js_name = missingProtectRead)]
+    pub missing_protect_read: bool,
+
+    /// Whether the protection level for deleting the file is missing.
+    #[wasm_bindgen(readonly, js_name = missingProtectDelete)]
+    pub missing_protect_delete: bool,
+
+    /// Whether the project was not found. This means that the project handle
+    /// does not point to a valid project. This can happen when project was removed
+    /// from the work session when the file builder was being set.
+    #[wasm_bindgen(readonly, js_name = projectNotFound)]
+    pub project_not_found: bool,
 }
 
 impl From<FileBuilder> for File {
     fn from(builder: FileBuilder) -> Self {
         Self {
             name: builder.name,
-            bytes: Some(vec_i8_into_u8(builder.bytes.to_vec())),
+            bytes: Some(builder.bytes.to_vec()),
             can_load: true,
             protect: Protect::new(builder.protect_read, builder.protect_delete),
+            uuid: Uuid::nil(),
         }
     }
 }

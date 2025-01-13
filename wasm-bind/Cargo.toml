@@ -22,7 +22,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 lazy-regex = "3.4"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
-tokio = { version = "1.0", features = ["sync"] }
+uuid = { version = "1.11", features = ["v4", "js"] }
 
 base = { path = "../base" }
 

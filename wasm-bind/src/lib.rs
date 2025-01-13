@@ -64,6 +64,21 @@ impl InterString {
         }
     }
 
+    fn js(&self) -> Option<JsString> {
+        match self.sync {
+            InterStrSync::Js | InterStrSync::Both => Some(self.js.clone()),
+            InterStrSync::Rust => None,
+        }
+    }
+
+    fn to_js(&self) -> JsString {
+        if let Some(js) = self.js() {
+            js
+        } else {
+            JsString::from(self.rust.as_str())
+        }
+    }
+
     fn new_js(js: JsString) -> Self {
         Self {
             rust: CompactString::new(""),
@@ -72,7 +87,7 @@ impl InterString {
         }
     }
 
-    pub fn make_js(&mut self) -> &JsString {
+    pub fn make_js(&mut self) -> JsString {
         match self.sync {
             InterStrSync::Rust => {
                 self.js = JsString::from(self.rust.as_str());
@@ -81,7 +96,7 @@ impl InterString {
             InterStrSync::Js => {}
         }
         self.sync = InterStrSync::Both;
-        &self.js
+        self.js.clone()
     }
 
     pub fn make_rust(&mut self) -> &CompactString {
@@ -123,6 +138,39 @@ impl Default for InterString {
     }
 }
 
+impl From<JsString> for InterString {
+    fn from(js: JsString) -> Self {
+        Self::new_js(js)
+    }
+}
+
+impl From<String> for InterString {
+    fn from(rust: String) -> Self {
+        rust.as_str().into()
+    }
+}
+
+impl From<&str> for InterString {
+    fn from(rust: &str) -> Self {
+        Self {
+            rust: CompactString::new(rust),
+            js: JsString::from(rust),
+            sync: InterStrSync::Both,
+        }
+    }
+}
+
+impl From<CompactString> for InterString {
+    fn from(rust: CompactString) -> Self {
+        let js = JsString::from(rust.as_str());
+        Self {
+            rust,
+            js,
+            sync: InterStrSync::Both,
+        }
+    }
+}
+
 /// Error for failure to reconstruct a type from a JS value.
 pub enum TypeReconstructionError {
     MissingField(&'static str),
@@ -136,19 +184,33 @@ impl TypeReconstructionError {
     }
 }
 
-fn vec_i8_into_u8(v: Vec<i8>) -> Vec<u8> {
-    // Ideally we'd use Vec::into_raw_parts, but it's unstable,
-    // so we have to do it manually:
+trait MyUuid {
+    fn into_js_array(self) -> js_sys::Uint8Array;
+}
 
-    // First, make sure v's destructor doesn't free the data
-    // it thinks it owns when it goes out of scope.
-    let mut v = std::mem::ManuallyDrop::new(v);
+impl MyUuid for uuid::Uuid {
+    fn into_js_array(self) -> js_sys::Uint8Array {
+        let bytes = self.as_bytes();
+        let arr = js_sys::Uint8Array::new_with_length(bytes.len() as u32);
+        for (i, byte) in bytes.iter().enumerate() {
+            arr.set_index(i as u32, *byte);
+        }
+        arr
+    }
+}
 
-    // then, pick apart the existing Vec
-    let p = v.as_mut_ptr();
-    let len = v.len();
-    let cap = v.capacity();
-    
-    // finally, adopt the data into a new Vec
-    unsafe { Vec::from_raw_parts(p as *mut u8, len, cap) }
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct PermissionError;
+
+// JS standard File type.
+#[wasm_bindgen]
+extern "C" {
+    pub type File;
+
+    #[wasm_bindgen(method, getter)]
+    fn name(this: &File) -> JsString;
+
+    #[wasm_bindgen(method, getter)]
+    fn bytes(this: &File) -> js_sys::Uint8Array;
 }
