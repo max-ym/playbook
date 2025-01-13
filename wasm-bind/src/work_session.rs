@@ -59,7 +59,7 @@ impl WorkSession {
     }
 }
 
-struct WorkSessionProject {
+pub struct WorkSessionProject {
     project: Project,
     changes: ChangeStack,
 }
