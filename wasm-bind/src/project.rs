@@ -68,7 +68,12 @@ pub struct JsProject {
 
 #[wasm_bindgen(js_class = Project)]
 impl JsProject {
-    #[wasm_bindgen(getter, js_name = getFiles)]
+    /// Get the files in the project. Note that some of the files can be declared
+    /// but not actually loaded into the memory. This may be the case if the file is
+    /// still being loaded or if the user has no permission to load the file content.
+    /// However, this list will contain all files that the project has as long as
+    /// the user has permission to view the project at least read-only.
+    #[wasm_bindgen(getter, js_name = files)]
     pub fn get_files(&self) -> Vec<JsProjectFile> {
         let ws = work_session::work_session().read().unwrap();
 
@@ -94,27 +99,33 @@ impl JsProject {
             .collect()
     }
 
-    #[wasm_bindgen(getter, js_name = getName)]
+    /// Get the name of the project.
+    #[wasm_bindgen(getter, js_name = name)]
     pub fn get_name(&self) -> JsString {
         let ws = work_session::work_session().read().unwrap();
         let project = ws.project_by_id(self.uuid).unwrap();
         project.name().to_js()
     }
 
-    #[wasm_bindgen(setter, js_name = setName)]
+    /// Set the new name for the project.
+    #[wasm_bindgen(setter, js_name = name)]
     pub fn set_name(&mut self, name: JsString) {
         let mut ws = work_session::work_session().write().unwrap();
         let project = ws.project_by_id_mut(self.uuid).unwrap();
         project.name.set_js(name);
     }
 
-    pub fn load() -> Result<JsProject, ProjectLoadError> {
+    /// Load the project with the given identifier, as returned by listing request.
+    pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
         todo!()
     }
 
+    /// Canvas of the project. This is where the nodes are placed.
     #[wasm_bindgen(getter)]
     pub fn canvas(&mut self) -> JsCanvas {
-        JsCanvas { project_uuid: self.uuid }
+        JsCanvas {
+            project_uuid: self.uuid,
+        }
     }
 }
 
@@ -127,6 +138,7 @@ pub enum ProjectLoadError {
     ServerError,
 }
 
+/// Canvas of the project. This is where the nodes are placed.
 #[derive(Debug, Copy, Clone)]
 #[wasm_bindgen(js_name = Canvas)]
 pub struct JsCanvas {
@@ -135,23 +147,33 @@ pub struct JsCanvas {
 
 #[wasm_bindgen(js_class = Canvas)]
 impl JsCanvas {
+    /// Add a new node to the canvas.
     #[wasm_bindgen(js_name = addNode)]
     pub fn add_node(&mut self, node: JsNodeStub) -> JsNode {
         todo!()
     }
 
+    /// Get iterator over nodes in this canvas.
+    ///
+    /// This is useful when you want to iterate over all nodes in the canvas, e.g. to
+    /// initialize UI view with all nodes.
+    ///
+    /// This iterator is broken when the canvas is modified, and
+    /// may not return all nodes or have some nodes repeated in such case. You
+    /// should not have this iterator around while modifying the canvas.
     #[wasm_bindgen(js_name = nodeIterator)]
     pub fn node_iter(&self) -> JsNodeIter {
         todo!()
     }
 }
 
+/// Stub for a node. This is a configuration that allows to create a node in the canvas.
+/// The same stub can be reused to effectively clone the node.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = NodeStub)]
-pub struct JsNodeStub {
+pub struct JsNodeStub {}
 
-}
-
+/// Node in the canvas. This is actual instance of the placed node in a project.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Node)]
 pub struct JsNode {
@@ -161,23 +183,28 @@ pub struct JsNode {
 
 #[wasm_bindgen(js_class = Node)]
 impl JsNode {
+    /// Get the stub that will allow to create a new node with the same configuration.
     #[wasm_bindgen(js_name = stub)]
     pub fn stub(&self) -> JsNodeStub {
         todo!()
     }
 
+    /// Get the output pin at the given position.
     pub fn outAt(&self, position: u32) -> Option<JsNodePin> {
         todo!()
     }
 
+    /// Get the input pin at the given position.
     pub fn inAt(&self, position: u32) -> Option<JsNodePin> {
         todo!()
     }
 
+    /// Get the node identifier.
     pub fn id(&self) -> u32 {
         self.node_id.get()
     }
 
+    /// Drop the node from the canvas. You should not use the node handle after this.
     pub fn drop(self) -> JsNodeStub {
         todo!()
     }
@@ -190,6 +217,15 @@ impl JsNode {
 pub struct JsNodeIter {
     project_uuid: Uuid,
     pos: usize,
+}
+
+#[wasm_bindgen(js_class = NodeIter)]
+impl JsNodeIter {
+    /// Get the next node in the canvas.
+    /// Returns `undefined` if there are no more nodes.
+    pub fn next(&mut self) -> Option<JsNode> {
+        todo!()
+    }
 }
 
 /// Node pin. This is a connection point on a node.
@@ -214,8 +250,8 @@ impl JsNodePin {
         todo!()
     }
 
-    /// Whether the pin is an output pin.
-    #[wasm_bindgen(getter)]
+    /// Whether the pin is an output pin (`true`). If it is an input pin, this returns `false`.
+    #[wasm_bindgen(getter, js_name = isOutput)]
     pub fn is_output(&self) -> bool {
         self.is_output
     }
@@ -238,16 +274,20 @@ impl JsNodePin {
         todo!()
     }
 
+    /// Peek into the data that this pin receiver or transmits.
+    /// This may be useful for UI to show the data for user debugging or analysis.
     #[wasm_bindgen(js_name = peekInto)]
     pub fn peek_into(&self) -> JsPeekFlow {
         todo!()
     }
 
+    /// Get the errors that this pin is associated with.
     pub fn errors(&self) -> Vec<JsNodePinError> {
         todo!()
     }
 }
 
+/// Kind of the data type.
 #[derive(Debug, Clone, Copy)]
 #[wasm_bindgen(js_name = DataTypeKind)]
 pub enum JsDataTypeKind {
@@ -280,21 +320,24 @@ pub struct JsDataType {
     pub is_nullable: bool,
 }
 
+/// Peek into the flow of values. This is useful for debugging and analysis.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = PeekFlow)]
 pub struct JsPeekFlow {
-
+    // TODO
 }
 
 #[wasm_bindgen(js_class = PeekFlow)]
 impl JsPeekFlow {
     /// Get the data type of the values in this flow.
+    /// If the data type is nested, this will return an array of data types, where
+    /// the first element is the outermost data type.
     #[wasm_bindgen(js_name = dataType)]
-    pub fn data_type(&self) -> JsDataType {
+    pub fn data_type(&self) -> Vec<JsDataType> {
         todo!()
     }
 
-    /// Shuffle and get the array of values, up to the given limit.
+    /// Shuffle and get the array of unique values, up to the given limit.
     /// Array will have less elements if the flow does not have enough unique values.
     #[wasm_bindgen(js_name = shuffled)]
     pub fn shuffled(limit: usize) -> Vec<JsFlowValue> {
@@ -304,15 +347,12 @@ impl JsPeekFlow {
 
 #[derive(Debug)]
 #[wasm_bindgen(js_name = NodePinError)]
-pub struct JsNodePinError {
+pub struct JsNodePinError {}
 
-}
-
+/// Value in the flow. This is a peek of a unique value from some flow.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = FlowValue)]
-pub struct JsFlowValue {
-
-}
+pub struct JsFlowValue {}
 
 #[wasm_bindgen(js_class = FlowValue)]
 impl JsFlowValue {
@@ -574,7 +614,7 @@ impl JsFileBuilder {
     }
 
     /// Set the file contents from a JS file object.
-    #[wasm_bindgen(setter, js_name = setFile)]
+    #[wasm_bindgen(setter, js_name = file)]
     pub fn set_file(&mut self, file: crate::File) {
         self.name = Some(file.name());
         self.bytes = Some(file.bytes());
