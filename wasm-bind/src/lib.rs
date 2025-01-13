@@ -6,6 +6,8 @@ pub mod work_session;
 
 pub mod project;
 
+pub mod vcs;
+
 /// To use with `expect` method on operations on `RwLock` of `WorkSession`.
 /// This should never happen, but if it does, it means that the WASM code panicked
 /// and the session is in an invalid state.
