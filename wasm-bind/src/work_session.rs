@@ -116,7 +116,7 @@ pub struct JsHistory;
 impl JsHistory {
     /// Undo the last change in current project.
     /// Returns the undone change in the history stack.
-    /// If there are no changes to undo, returns `null`.
+    /// If there are no changes to undo, returns `undefined`.
     pub fn undo(&self) -> Option<JsChangeItem> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
         let project = ws.current_project_mut();
@@ -130,7 +130,7 @@ impl JsHistory {
 
     /// Redo the last undone change in current project.
     /// Returns the redone change in the history stack.
-    /// If there are no changes to redo, returns `null`.
+    /// If there are no changes to redo, returns `undefined`.
     pub fn redo(&self) -> Option<JsChangeItem> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
         let project = ws.current_project_mut();
@@ -145,7 +145,7 @@ impl JsHistory {
     /// Go to a specific change in current project. 
     /// Where 0 is the first change after the initial state.
     /// Returns the position starting from which the changes were undone or redone (position before
-    /// the change). If the passed position is out of bounds, this is no-op and returns `null`.
+    /// the change). If the passed position is out of bounds, this is no-op and returns `undefined`.
     pub fn goto(&self, pos: usize) -> Option<usize> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
         let project = ws.current_project_mut();

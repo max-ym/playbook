@@ -205,7 +205,7 @@ pub struct JsNodePin {
 #[wasm_bindgen(js_class = NodePin)]
 impl JsNodePin {
     /// Get the data type of the pin.
-    /// If the pin has unknown data type, this will return `null`.
+    /// If the pin has unknown data type, this will return `undefined`.
     /// If the pin has nested data type, this will return an array of data types, where
     /// the first element is the outermost data type.
     /// Normal data type will return a single element array.
@@ -232,7 +232,7 @@ impl JsNodePin {
         self.ordinal
     }
 
-    /// Get the node that this pin is connected to. Null if not connected.
+    /// Get the node that this pin is connected to. `undefined` if not connected.
     #[wasm_bindgen(js_name = connectedTo)]
     pub fn connected_to(&self) -> Option<JsNodePin> {
         todo!()
