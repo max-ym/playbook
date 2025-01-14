@@ -160,6 +160,14 @@ impl JsWorkSession {
     pub async fn save_to_server(&self) -> Result<(), JsError> {
         todo!()
     }
+
+    /// Set a callback to be called when the state of the work session changes.
+    /// This includes interruptions in network connection, background validation run,
+    /// background downloads, etc.
+    #[wasm_bindgen(setter, js_name = onStateChange)]
+    pub fn set_on_state_change(&mut self, f: js_sys::Function) {
+        todo!()
+    }
 }
 
 /// Global history stack of changes made to the current project.
