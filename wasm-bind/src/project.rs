@@ -63,7 +63,7 @@ impl Project {
 /// A project handle that can be used to access project data from the current work session.
 #[wasm_bindgen(js_name = Project)]
 pub struct JsProject {
-    uuid: Uuid,
+    pub(crate) uuid: Uuid,
 }
 
 #[wasm_bindgen(js_class = Project)]
@@ -342,6 +342,13 @@ impl JsPeekFlow {
 
     /// Shuffle and get the array of unique values, up to the given limit.
     /// Array will have less elements if the flow does not have enough unique values.
+    /// 
+    /// This is implemented in such way so that the example validations are quick
+    /// to produce several unique values, omitting full calculation of all test-file provided data.
+    /// The process of fetching unique values is stopped as soon as the limit is reached.
+    /// It is obviously much faster than to validate full
+    /// file with possibly tens of thousands of rows just to show 10 or 20 unique values.
+    /// Caller thus can expect almost instant result for small limits even in complex flows.
     #[wasm_bindgen(js_name = shuffled)]
     pub fn shuffled(&self, limit: usize) -> Vec<JsFlowValue> {
         todo!()
@@ -360,6 +367,9 @@ pub struct JsFlowValue {}
 #[wasm_bindgen(js_class = FlowValue)]
 impl JsFlowValue {
     /// How many times this value repeats.
+    /// This value may not always be accurate, as it is calculated on the fly and
+    /// in complex flows it may be too expensive to calculate the exact count.
+    /// Assume this is "at least" count.
     #[wasm_bindgen(getter)]
     pub fn count(&self) -> usize {
         todo!()
@@ -408,6 +418,8 @@ impl File {
     }
 }
 
+/// File in a project. This handle points to a file effective in some commit in
+/// the history of a project (or in work session with current uncommited changes).
 #[derive(Debug)]
 #[wasm_bindgen(js_name = ProjectFile)]
 pub struct JsProjectFile {
@@ -520,6 +532,7 @@ impl Protect {
     }
 }
 
+/// Protection configuration for a resource.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[wasm_bindgen(js_name = Protect)]
 pub struct JsProtect {

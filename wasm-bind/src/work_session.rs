@@ -10,8 +10,7 @@ use crate::*;
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
 pub fn work_session() -> &'static RwLock<WorkSession> {
-    WORK_SESSION.get_or_init(|| RwLock::new(WorkSession::new()));
-    WORK_SESSION.get().unwrap()
+    WORK_SESSION.get_or_init(|| RwLock::new(WorkSession::new()))
 }
 
 pub struct WorkSession {
@@ -50,12 +49,20 @@ impl WorkSession {
             .map(|p| &p.project)
     }
 
-    pub fn current_project(&self) -> &WorkSessionProject {
-        &self.projects[self.current_project_idx]
+    pub fn current_project(&self) -> Option<&WorkSessionProject> {
+        if self.projects.is_empty() {
+            None
+        } else {
+            Some(&self.projects[self.current_project_idx])
+        }
     }
 
-    pub fn current_project_mut(&mut self) -> &mut WorkSessionProject {
-        &mut self.projects[self.current_project_idx]
+    pub fn current_project_mut(&mut self) -> Option<&mut WorkSessionProject> {
+        if self.projects.is_empty() {
+            None
+        } else {
+            Some(&mut self.projects[self.current_project_idx])
+        }
     }
 }
 
@@ -102,9 +109,22 @@ pub struct JsWorkSession;
 
 #[wasm_bindgen(js_class = WorkSession)]
 impl JsWorkSession {
+    /// Get the current work session.
+    /// This throws an exception `WorkSessionUninitError` if the work session is not initialized
+    /// or is in an invalid state.
     pub fn get() -> Result<Self, JsWorkSessionUninitError> {
         // TODO
         Ok(Self)
+    }
+
+    /// Get the current project in the work session. Returns `undefined` if there are no projects.
+    #[wasm_bindgen(getter, js_name = currentProject)]
+    pub fn current_project(&self) -> Option<project::JsProject> {
+        let ws = work_session().read().expect(WORK_SESSION_POISONED);
+        let project = ws.current_project()?;
+        Some(project::JsProject {
+            uuid: project.uuid(),
+        })
     }
 }
 
@@ -119,7 +139,7 @@ impl JsHistory {
     /// If there are no changes to undo, returns `undefined`.
     pub fn undo(&self) -> Option<JsChangeItem> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
-        let project = ws.current_project_mut();
+        let project = ws.current_project_mut()?;
         let position = project.undo()?;
         project.change_at(position).map(|change| JsChangeItem {
             timestamp: change.micros_since_unix() as u64,
@@ -133,7 +153,7 @@ impl JsHistory {
     /// If there are no changes to redo, returns `undefined`.
     pub fn redo(&self) -> Option<JsChangeItem> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
-        let project = ws.current_project_mut();
+        let project = ws.current_project_mut()?;
         let position = project.redo()?;
         project.change_at(position).map(|change| JsChangeItem {
             timestamp: change.micros_since_unix() as u64,
@@ -148,7 +168,7 @@ impl JsHistory {
     /// the change). If the passed position is out of bounds, this is no-op and returns `undefined`.
     pub fn goto(&self, pos: usize) -> Option<usize> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
-        let project = ws.current_project_mut();
+        let project = ws.current_project_mut()?;
         project.goto(pos)
     }
 
@@ -156,7 +176,7 @@ impl JsHistory {
     /// If the position is out of bounds, returns `undefined`.
     pub fn change_at(&self, pos: usize) -> Option<JsChangeItem> {
         let ws = work_session().read().expect(WORK_SESSION_POISONED);
-        let project = ws.current_project();
+        let project = ws.current_project()?;
         project.change_at(pos).map(|change| JsChangeItem {
             timestamp: change.micros_since_unix() as u64,
             position: pos,
