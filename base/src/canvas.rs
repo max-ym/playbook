@@ -14,6 +14,9 @@ pub struct Canvas<NodeMeta> {
     /// From these nodes the execution of the flow starts.
     /// Normally there should be only one, but we still allow to store here
     /// multiple and then will show an error during validation.
+    /// 
+    /// For projects that act as a library, the root nodes should be absent and instead
+    /// the project should have at least one input or output pin exposed.
     root_nodes: SmallVec<[Id; 1]>,
 }
 
@@ -76,6 +79,12 @@ pub struct Node<Meta> {
     pub id: Id,
     pub stub: NodeStub,
     pub meta: Meta,
+}
+
+impl<Meta> Node<Meta> {
+    pub fn is_predicate(&self) -> bool {
+        matches!(self.stub, NodeStub::Func(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -445,6 +454,16 @@ pub enum PrimitiveTypeConst {
     Option(&'static PrimitiveTypeConst),
 }
 
+/// Predicate is effectively some function that can take and output
+/// some values. It can be used to filter records, find records, etc.
+/// 
+/// As predicates, external projects that are applicable can be imported.
+/// They are then considered external dependencies of the current project.
+/// 
+/// To qualify as a predicate, the function must be pure and deterministic.
+/// 
+/// External projects are qualified if they have at least one pin for the node
+/// they will be represented with. They themselves, as functions, should be pure and deterministic.
 #[derive(Debug)]
 pub struct Predicate {
     pub inputs: SmallVec<[PrimitiveType; 1]>,

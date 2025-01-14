@@ -5,3 +5,5 @@ pub mod vcs;
 pub mod canvas;
 
 pub mod table_data;
+
+pub mod valid;
