@@ -1,14 +1,18 @@
-use project::{JsProtect, Protect};
+use project::JsProtect;
 
 use crate::*;
 
 /// Commit builder. Allows to create a commit, verify validity of the project and
 /// downstream dependencies locally, if possible. And then commit the changes to the server.
-/// 
+///
 /// On deploy commits,
 /// the server will run full validations of the project and all dependencies, even those
 /// that cannot be accessed by the user. In turn, server will return the validation results
 /// to the client, with whether the commit was successful or was denied.
+/// 
+/// Server will save previous validation runs stored in cache, so even though effectively this is a
+/// "full validation" run, in reality only changed things are incrementally re-validated,
+/// which makes the process fast.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = CommitBuilder)]
 pub struct JsCommitBuilder {
@@ -18,6 +22,7 @@ pub struct JsCommitBuilder {
 
 #[wasm_bindgen(js_class = CommitBuilder)]
 impl JsCommitBuilder {
+    /// Create a new commit builder object with the given commit/deploy message.
     #[wasm_bindgen(constructor)]
     pub fn new(message: JsString) -> Self {
         Self { message }
@@ -32,7 +37,7 @@ impl JsCommitBuilder {
     /// Deploy the project with the given version tag. The tag should be unique per project.
     /// Can throw exception if the tag is already used or if there are issues
     /// with the project, commit, or downstream dependencies, or server connectivity.
-    /// 
+    ///
     /// The builder will be unusable after successful deploy
     /// (further operations will throw exceptions).
     #[wasm_bindgen(js_name = commitWithTag)]
@@ -48,7 +53,7 @@ impl JsCommitBuilder {
     /// If dependency list is loaded, each individual dependency should in turn be loaded.
     /// Some may not be accessible due to permissions, so they effectively can be skipped and then
     /// they will not be accounted for in the validation.
-    /// 
+    ///
     /// Will throw an exception if this builder was invalidated.
     pub async fn downstreams(&self) -> Result<Vec<JsDownstreamDependency>, JsLoadDepsError> {
         todo!()
@@ -67,11 +72,22 @@ impl JsCommitBuilder {
 pub struct JsCommit {
     /// The commit hash.
     #[wasm_bindgen(readonly, getter_with_clone)]
-    pub hash: JsString,
+    pub hash: JsCommitHash,
 
     /// The tag of the commit, if it is a deploy.
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub tag: Option<JsString>,
+
+    /// For deploys, they can be yanked and
+    /// if it was, this will return a hash of the commit on which this operation was carried out.
+    /// Will return `undefined` if the deploy was not yanked or if the commit is not a deploy.
+    #[wasm_bindgen(readonly, getter_with_clone, js_name = yankedWith)]
+    pub yanked_with: Option<JsCommitHash>,
+
+    /// Tag of the deploy which was yanked by this commit.
+    /// Will return `undefined` if the commit is not a yank of a deploy.
+    #[wasm_bindgen(readonly, getter_with_clone, js_name = yankOfTag)]
+    pub yank_of_tag: Option<JsString>,
 
     /// The commit message.
     #[wasm_bindgen(readonly, getter_with_clone)]
@@ -93,6 +109,30 @@ impl JsCommit {
     pub fn is_deploy(&self) -> bool {
         self.tag.is_some()
     }
+
+    /// Whether the deploy was yanked.
+    #[wasm_bindgen(getter, js_name = isYanked)]
+    pub fn is_yanked(&self) -> bool {
+        self.yanked_with.is_some()
+    }
+
+    /// For deploy commits, start a commit builder for a yank operation.
+    /// This will return a builder object configured to yank this deploy on
+    /// commit (or deploy) of the commit under construction.
+    /// Will throw an exception if this commit is not a deploy and thus
+    /// cannot be yanked, or if the deploy was already yanked.
+    #[wasm_bindgen(js_name = buildYank)]
+    pub fn build_yank(&self, reason: JsString) -> Result<JsCommitBuilder, JsError> {
+        todo!()·
+    }
+}
+
+/// Hash of a commit.
+#[derive(Debug, Clone)]
+#[wasm_bindgen(js_name = CommitHash)]
+pub struct JsCommitHash {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub hash: JsString,
 }
 
 /// Error during commit submission. Note, this error does not rise due to failed validation.
@@ -176,8 +216,8 @@ impl JsValidationOutcome {
     /// The validation errors of the dependency.
     /// May be censored if the user does not have permissions to see them or see full data
     /// in them. In such cases, this list may be useful for total count.
-    /// 
-    /// This array is empty if there are no errors. 
+    ///
+    /// This array is empty if there are no errors.
     #[wasm_bindgen(getter)]
     pub fn errors(&self) -> Vec<JsDownstreamLogicError> {
         todo!()
@@ -228,8 +268,9 @@ impl JsDownstreamDependency {
     /// Load the dependency contents required for validation.
     /// This will fail if the user has insufficient permissions to load the dependency, or
     /// network issues prevent loading of the dependency.
-    /// This is no-op if the dependency is already loaded into the work session.
-    /// 
+    /// This is no-op if the dependency is already loaded into the work session either as a
+    /// standalone project or as a dependency (without unneeded UI-related meta).
+    ///
     /// This takes into account `resolveWith` setting which selects effective version
     /// that will be used for validation.
     /// Changes to the `resolveWith` setting may require reloading of the dependency.
@@ -253,10 +294,10 @@ impl JsDownstreamDependency {
     /// This function either runs the local validation to get the errors, or if the dependency
     /// was already validated either directly or during the validation of another dependency,
     /// it will return the cached errors immediately.
-    /// 
+    ///
     /// This can return different errors on change to "resolveWith" mechanism and subsequent
     /// reloading of the dependency.
-    /// 
+    ///
     /// Undefined is returned if the dependency is not loaded.
     pub async fn errors(&mut self) -> Option<Vec<JsDownstreamLogicError>> {
         todo!()
@@ -264,16 +305,16 @@ impl JsDownstreamDependency {
 
     /// Set given mechanism to resolve the dependency version to select for the deployment.
     /// This will be taken into account by the server during full validation run.
-    /// 
+    ///
     /// By default, `KeepCurrent` is used.
     /// Change of this setting may require reloading of the dependency.
-    /// This can also in turn affect "errors" method result.
+    /// This can also in turn affect `errors` method result.
     #[wasm_bindgen(setter, js_name = resolveWith)]
     pub fn set_resolve_with(&mut self, resolution: JsDownstreamResolution) {
         todo!()
     }
 
-    /// Get the mechanism to resolve the dependency version to select for the deployment.
+    /// Get the selected mechanism to resolve the dependency version to select for the deployment.
     #[wasm_bindgen(getter, js_name = resolveWith)]
     pub fn get_resolve_with(&self) -> JsDownstreamResolution {
         todo!()
@@ -301,4 +342,63 @@ pub enum JsDownstreamResolution {
 
     /// Upgrade to the latest version of the dependency.
     UpgradeToLatest,
+}
+
+/// The history in the version control system.
+#[wasm_bindgen(js_name = VcsHistory)]
+pub struct JsVcsHistory {
+    // TODO
+}
+
+#[wasm_bindgen(js_class = VcsHistory)]
+impl JsVcsHistory {
+    /// Get commits in the history of the project from given commit.
+    /// Count argument specifies how many commits to move back or forward from the pivot commit.
+    /// If count is negative, moves back (into the past),
+    /// if positive, moves forward (into the future).
+    /// 
+    /// If the pivot commit is not found, returns `undefined`.
+    #[wasm_bindgen(js_name = slicePivotCount)]
+    pub fn slice_pivot_count(&self, pivot: JsCommitHash, count: i32) -> Option<Vec<JsHistoryItem>> {
+        todo!()
+    }
+
+    /// Get the latest commits in the history of the project up to the given limit.
+    #[wasm_bindgen(js_name = sliceLatest)]
+    pub fn slice_latest(&self, limit: u32) -> Vec<JsHistoryItem> {
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = HistoryItem)]
+pub struct JsHistoryItem {
+    // TODO
+}
+
+#[wasm_bindgen(js_class = HistoryItem)]
+impl JsHistoryItem {
+    /// The commit hash.
+    #[wasm_bindgen(getter)]
+    pub fn hash(&self) -> JsCommitHash {
+        todo!()
+    }
+
+    /// The commit message.
+    #[wasm_bindgen(getter)]
+    pub fn message(&self) -> JsString {
+        todo!()
+    }
+
+    /// The commit timestamp.
+    #[wasm_bindgen(getter)]
+    pub fn timestamp(&self) -> u64 {
+        todo!()
+    }
+
+    /// The commit author.
+    #[wasm_bindgen(getter)]
+    pub fn author(&self) -> JsString {
+        todo!()
+    }
 }
