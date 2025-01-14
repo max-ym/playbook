@@ -35,6 +35,10 @@ impl WorkSession {
         }
     }
 
+    fn project_idx(&self, uuid: Uuid) -> Option<usize> {
+        self.projects.iter().position(|p| p.project.uuid() == uuid)
+    }
+
     pub fn project_by_id_mut(&mut self, uuid: Uuid) -> Option<&mut crate::project::Project> {
         self.projects
             .iter_mut()
@@ -126,18 +130,51 @@ impl JsWorkSession {
             uuid: project.uuid(),
         })
     }
+
+    /// Select another project to be "current", e.g. the one that is currently being shown
+    /// on the UI. This in turn will affect on what global work session history shows.
+    /// Switch of the current project will also switch all related sub-resources like
+    /// project history (undo/redo stack), etc. Old changes are still preserved and can be
+    /// recovered by switching back to the previous project.
+    #[wasm_bindgen(js_name = switchCurrentProject)]
+    pub fn switch_current_project(&self, project: project::JsProject) -> Result<(), JsError> {
+        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let idx = ws.project_idx(project.uuid).ok_or(JsError::new("Project not found"))?;
+        ws.current_project_idx = idx;
+        Ok(())
+    }
+
+    /// Check whether all current changes (as a draft) are synchronized with the server.
+    /// This is useful when the user has sudden power loss, network disconnect, browser
+    /// crash, for the changes to remain recoverable.
+    /// True means all data is saved on the server, false means there are unsaved changes.
+    #[wasm_bindgen(getter, js_name = isServerSaved)]
+    pub fn is_server_saved() -> bool {
+        todo!()
+    }
+
+    /// Force save all current changes to the server.
+    /// This is useful when the user wants to make sure that all changes are saved e.g. when
+    /// closing the browser tab.
+    #[wasm_bindgen(js_name = saveToServer)]
+    pub async fn save_to_server(&self) -> Result<(), JsError> {
+        todo!()
+    }
 }
 
+/// Global history stack of changes made to the current project.
+/// This allows to undo and redo changes of the project on the screen.
+/// This is a singleton object.
 #[derive(Debug, Copy, Clone)]
 #[wasm_bindgen(js_name = History)]
 pub struct JsHistory;
 
 #[wasm_bindgen(js_class = History)]
 impl JsHistory {
-    /// Undo the last change in current project.
+    /// Undo the last change in the current project.
     /// Returns the undone change in the history stack.
     /// If there are no changes to undo, returns `undefined`.
-    pub fn undo(&self) -> Option<JsChangeItem> {
+    pub fn undo() -> Option<JsChangeItem> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
         let project = ws.current_project_mut()?;
         let position = project.undo()?;
@@ -148,10 +185,10 @@ impl JsHistory {
         })
     }
 
-    /// Redo the last undone change in current project.
+    /// Redo the last undone change in the current project.
     /// Returns the redone change in the history stack.
     /// If there are no changes to redo, returns `undefined`.
-    pub fn redo(&self) -> Option<JsChangeItem> {
+    pub fn redo() -> Option<JsChangeItem> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
         let project = ws.current_project_mut()?;
         let position = project.redo()?;
@@ -162,11 +199,11 @@ impl JsHistory {
         })
     }
 
-    /// Go to a specific change in current project. 
+    /// Go to a specific change in the current project. 
     /// Where 0 is the first change after the initial state.
     /// Returns the position starting from which the changes were undone or redone (position before
     /// the change). If the passed position is out of bounds, this is no-op and returns `undefined`.
-    pub fn goto(&self, pos: usize) -> Option<usize> {
+    pub fn goto(pos: usize) -> Option<usize> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
         let project = ws.current_project_mut()?;
         project.goto(pos)
@@ -174,7 +211,7 @@ impl JsHistory {
 
     /// Get the change at a specific position in the history stack.
     /// If the position is out of bounds, returns `undefined`.
-    pub fn change_at(&self, pos: usize) -> Option<JsChangeItem> {
+    pub fn change_at(pos: usize) -> Option<JsChangeItem> {
         let ws = work_session().read().expect(WORK_SESSION_POISONED);
         let project = ws.current_project()?;
         project.change_at(pos).map(|change| JsChangeItem {
