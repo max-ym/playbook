@@ -123,7 +123,7 @@ impl JsCommit {
     /// cannot be yanked, or if the deploy was already yanked.
     #[wasm_bindgen(js_name = buildYank)]
     pub fn build_yank(&self, reason: JsString) -> Result<JsCommitBuilder, JsError> {
-        todo!()·
+        todo!();
     }
 }
 
