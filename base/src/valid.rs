@@ -1,6 +1,9 @@
 use smallvec::SmallVec;
 
-use crate::canvas::{Edge, Id as NodeId, Node, Value};
+use crate::canvas::{Edge, Id, Node, Value};
+
+type NodeId = Id;
+type EdgeId = Id;
 
 /// Chains are individual groups of flows that connect one input,
 /// pass the data through a series of transformations (nodes), and at the end
@@ -19,46 +22,49 @@ struct Chain {
 
 type ChainId = usize;
 
+
 /// Validation plan is a collection of chains that are executed in a specific order.
 #[derive(Debug)]
-pub struct ValidationPlan<NodeMeta> {
-    nodes: Vec<Node<NodeMeta>>,
-    edges: Vec<Edge>,
+pub struct ValidationPlan<'canvas, NodeMeta> {
+    nodes: Vec<&'canvas Node<NodeMeta>>,
+    edges: Vec<&'canvas Edge>,
 
     chains: Vec<Chain>,
     steps: Vec<ChainId>,
 
-    /// The nodes that are the data inputs to the validation plan.
-    inputs: SmallVec<[NodeId; 1]>,
-    outputs: SmallVec<[NodeId; 1]>,
+    /// The edges that are the data inputs to the validation plan.
+    /// For the plans that contain root nodes (which are effectively generating new data),
+    /// the inputs here are the output edges of those root nodes.
+    inputs: SmallVec<[EdgeId; 1]>,
+    outputs: SmallVec<[EdgeId; 1]>,
 }
 
 /// A helper struct that is used to store information about how
 /// a predicate should be executed.
 #[derive(Debug)]
-pub struct PredicatePlan {
+pub struct PredicatePlan<'canvas> {
     /// ID of the node that is the predicate.
     id: NodeId,
 
     /// Validation plan that represents the predicate.
-    validation_plan: ValidationPlan<()>,
+    validation_plan: ValidationPlan<'canvas, ()>,
 }
 
-impl PartialEq for PredicatePlan {
+impl PartialEq for PredicatePlan<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl Eq for PredicatePlan {}
+impl Eq for PredicatePlan<'_> {}
 
-impl PartialOrd for PredicatePlan {
+impl PartialOrd for PredicatePlan<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for PredicatePlan {
+impl Ord for PredicatePlan<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
     }
@@ -66,21 +72,21 @@ impl Ord for PredicatePlan {
 
 /// Context is a helper struct that is used to store all information needed to
 /// build a validation plan.
-pub struct Context<'a, NodeMeta> {
-    nodes: &'a [Node<NodeMeta>],
-    edges: &'a [Edge],
+pub struct Context<'canvas, NodeMeta> {
+    nodes: &'canvas [Node<NodeMeta>],
+    edges: &'canvas [Edge],
 
     /// Sorted array of all predicates resolved into predicate plans.
     /// Sorting allowes for binary search to find the predicate plan.
-    predicate_plans: &'a [PredicatePlan],
+    predicate_plans: &'canvas [PredicatePlan<'canvas>],
 }
 
-impl<'a, NodeMeta> Context<'a, NodeMeta> {
+impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
     /// Create a new context with the given nodes, edges and predicate plans.
     pub fn new(
-        nodes: &'a [Node<NodeMeta>],
-        edges: &'a [Edge],
-        predicate_plans: &'a [PredicatePlan],
+        nodes: &'canvas [Node<NodeMeta>],
+        edges: &'canvas [Edge],
+        predicate_plans: &'canvas [PredicatePlan],
     ) -> Self {
         if cfg!(debug_assertions) {
             assert!(predicate_plans.is_sorted());
@@ -110,7 +116,7 @@ impl<'a, NodeMeta> Context<'a, NodeMeta> {
     }
 }
 
-impl<NodeMeta> ValidationPlan<NodeMeta> {
+impl<NodeMeta> ValidationPlan<'_, NodeMeta> {
     /// Create a new validation plan to include all steps leading to this node, including
     /// the node itself.
     pub fn node_backtrace(ctx: Context<NodeMeta>, idx: NodeId) -> Result<Self, Todo> {
@@ -119,15 +125,15 @@ impl<NodeMeta> ValidationPlan<NodeMeta> {
 
     /// Put a value set into the validation plan and return the resulting values.
     /// The number of input values should match the number of input pins.
-    /// The number of output values matches the number of output pins.
     ///
-    /// The function returns the output values into the `out` vector. It thus can be
+    /// The function returns the output values into the `out` slice. It thus can be
     /// reused as a buffer to avoid unnecessary allocations for subsequent calls with
-    /// different input values.
+    /// different input values. The function will return error if the `out` buffer is of wrong
+    /// size.
     pub fn validate_value_set(
         &self,
-        values: impl Iterator<Item = Value>,
-        out: &mut Vec<Value>,
+        values: impl IntoIterator<Item = Value>,
+        out: &mut [Value],
     ) -> Result<(), Todo> {
         todo!()
     }
