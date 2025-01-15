@@ -14,7 +14,7 @@ pub struct Canvas<NodeMeta> {
     /// From these nodes the execution of the flow starts.
     /// Normally there should be only one, but we still allow to store here
     /// multiple and then will show an error during validation.
-    /// 
+    ///
     /// For projects that act as a library, the root nodes should be absent and instead
     /// the project should have at least one input or output pin exposed.
     root_nodes: SmallVec<[Id; 1]>,
@@ -65,7 +65,8 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let node = self.nodes.remove(idx);
 
         // Remove all edges that are connected to the removed node.
-        self.edges.retain(|e| e.from.node_id != id && e.to.node_id != id);
+        self.edges
+            .retain(|e| e.from.node_id != id && e.to.node_id != id);
 
         // Remove the node from the root nodes.
         self.root_nodes.retain(|root| *root != id);
@@ -83,7 +84,7 @@ pub struct Node<Meta> {
 
 impl<Meta> Node<Meta> {
     pub fn is_predicate(&self) -> bool {
-        matches!(self.stub, NodeStub::Func(_))
+        self.stub.is_predicate()
     }
 
     pub fn is_root(&self) -> bool {
@@ -91,7 +92,7 @@ impl<Meta> Node<Meta> {
     }
 
     /// Count of input pins of the node, if statically known.
-    pub const fn static_inputs(&self) -> Option<usize> {
+    pub const fn static_input_count(&self) -> Option<usize> {
         if let Some(v) = self.stub.static_inputs() {
             Some(v.len())
         } else {
@@ -100,7 +101,7 @@ impl<Meta> Node<Meta> {
     }
 
     /// Count of output pins of the node, if statically known.
-    pub const fn static_outputs(&self) -> Option<usize> {
+    pub const fn static_output_count(&self) -> Option<usize> {
         if let Some(v) = self.stub.static_outputs() {
             Some(v.len())
         } else {
@@ -109,13 +110,15 @@ impl<Meta> Node<Meta> {
     }
 }
 
+pub type PinOrder = u8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pin {
     /// The ID of the node this pin belongs to.
     pub node_id: Id,
 
     /// The index of this pin in the node's pin list.
-    pub order: u8,
+    pub order: PinOrder,
 }
 
 impl Pin {
@@ -273,6 +276,8 @@ pub enum NodeStub {
 
     /// List of values of some type. Can be used for filtering or
     /// values validation (e.g. to find invalid/unexpected values).
+    ///
+    /// All values should be of the same type.
     List { values: SmallVec<[Value; 1]> },
 
     /// Check the boolean predicate and execute either branch.
@@ -397,6 +402,41 @@ impl NodeStub {
         Some(some)
     }
 
+    /// How input and output pins relate to each other typewise. When
+    /// some input type should be the same as some output type, this function
+    /// returns an array of tuples, where each tuple contains the index of the input
+    /// and the index of the output pin that should be the same.
+    pub const fn io_relation(&self) -> &'static [(u8, u8)] {
+        use NodeStub::*;
+        match self {
+            File => &[],
+            SplitBy { .. } => &[],
+            Input { .. } => &[],
+            Drop => &[],
+            Output { .. } => &[],
+            StrOp(_) => &[(0, 1)],
+            Compare { .. } => &[],
+            Ordering => &[],
+            Regex(_) => &[],
+            FindRecord(_) => &[],
+            Map { .. } => &[],
+            List { .. } => &[(0, 1)],
+            IfElse { .. } => &[],
+            OkOrErr => &[],
+            Match { .. } => &[],
+            Func(_) => &[],
+            ParseDateTime { .. } => &[],
+            ParseMonetary { .. } => &[],
+            ParseInt { .. } => &[],
+            Constant(_) => &[],
+            Crash { .. } => &[],
+            OkOrCrash { .. } => &[],
+            Unreachable { .. } => &[],
+            Todo { .. } => &[],
+            Comment(_) => &[],
+        }
+    }
+
     /// Input pins of the node, if can be determined statically.
     /// Returns `None` if the inputs cannot be determined statically.
     /// Returned slice contains `None` for each input pin that cannot be determined statically,
@@ -437,6 +477,10 @@ impl NodeStub {
     /// Whether the node is a root node.
     pub const fn is_root(&self) -> bool {
         matches!(self, NodeStub::File)
+    }
+
+    pub const fn is_predicate(&self) -> bool {
+        matches!(self, NodeStub::Func(_))
     }
 }
 
@@ -503,12 +547,12 @@ pub enum PrimitiveTypeConst {
 
 /// Predicate is effectively some function that can take and output
 /// some values. It can be used to filter records, find records, etc.
-/// 
+///
 /// As predicates, external projects that are applicable can be imported.
 /// They are then considered external dependencies of the current project.
-/// 
+///
 /// To qualify as a predicate, the function must be pure and deterministic.
-/// 
+///
 /// External projects are qualified if they have at least one pin for the node
 /// they will be represented with. They themselves, as functions, should be pure and deterministic.
 #[derive(Debug)]

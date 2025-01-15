@@ -142,9 +142,11 @@ impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
         }
     }
 
-    fn nodes_connected_to(&self, node_id: NodeId, connected: &mut SmallVec<[EdgeAndNode; 32]>) {
+    /// Get all nodes that are providing data to the given node's inputs.
+    fn node_inputs_from(&self, node_id: NodeId, connected: &mut SmallVec<[EdgeAndNode; 32]>) {
         connected.clear();
 
+        todo!("Fix this. Take into account existance of input and output type of pins!");
         let place = self.binary_search_edge_place(node_id);
         while self.edges[place].from.node_id == node_id {
             let node = self.edges[place].from.node_id;
@@ -215,7 +217,7 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
 
         // Find the edges that lead to the original node and make them the starting points
         // for the paths.
-        ctx.nodes_connected_to(original_node_idx, &mut connected_nodes_buf);
+        ctx.node_inputs_from(original_node_idx, &mut connected_nodes_buf);
         unfinished_path_idx.reserve(connected_nodes_buf.len());
         for &edge_node in &connected_nodes_buf {
             let mut path = SmallVec::<[_; 32]>::new();
@@ -244,7 +246,7 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
                 let last = *paths[path_idx]
                     .last()
                     .expect("all paths have at least one node");
-                ctx.nodes_connected_to(last.node, &mut connected_nodes_buf);
+                ctx.node_inputs_from(last.node, &mut connected_nodes_buf);
 
                 let first_node = if let Some(first_node) = connected_nodes_buf.pop() {
                     first_node
@@ -363,7 +365,8 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
         if node.is_predicate() {
             let plan = &ctx.predicate_plan_for(node_id).validation_plan;
             (plan.inputs.len(), plan.outputs.len())
-        } else if let (Some(inputs), Some(outputs)) = (node.static_inputs(), node.static_outputs())
+        } else if let (Some(inputs), Some(outputs)) =
+            (node.static_input_count(), node.static_output_count())
         {
             (inputs, outputs)
         } else {
