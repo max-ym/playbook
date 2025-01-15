@@ -84,6 +84,7 @@ impl Ord for PredicatePlan<'_> {
 
 /// Context is a helper struct that is used to store all information needed to
 /// build a validation plan.
+#[derive(Debug)]
 pub struct Context<'canvas, NodeMeta> {
     nodes: &'canvas [Node<NodeMeta>],
     edges: &'canvas [Edge],
@@ -92,6 +93,18 @@ pub struct Context<'canvas, NodeMeta> {
     /// Sorting allowes for binary search to find the predicate plan.
     predicate_plans: &'canvas [PredicatePlan<'canvas>],
 }
+
+impl<T> std::clone::Clone for Context<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes,
+            edges: self.edges,
+            predicate_plans: self.predicate_plans,
+        }
+    }
+}
+
+impl<T> std::marker::Copy for Context<'_, T> {}
 
 impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
     /// Create a new context with the given nodes, edges and predicate plans.
@@ -126,16 +139,134 @@ impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
             predicate_plans,
         }
     }
+
+    fn nodes_connected_to(&self, node_id: NodeId, connected: &mut SmallVec<[EdgeAndNode; 32]>) {
+        connected.clear();
+
+        let place = self.binary_search_edge_place(node_id);
+        while self.edges[place].from.node_id == node_id {
+            let node = self.edges[place].from.node_id;
+            let edge = EdgeId::from_u32(place as _);
+            connected.push(EdgeAndNode { edge, node });
+        }
+    }
+
+    /// Use binary search to find the place of the edge for a given node in a
+    /// sorted array of edges. This either actually finds the real edge, but generally
+    /// it returns a place where the node's edges would be, if they were present.
+    fn binary_search_edge_place(&self, node_id: NodeId) -> usize {
+        match self.edges.binary_search(&Edge::binary_search_from(node_id)) {
+            Ok(v) => v,
+            Err(v) => v,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeAndNode {
+    edge: EdgeId,
+    node: NodeId,
 }
 
 impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
-    /// Create a new validation plan(s) to include all steps leading to this node, including
+    /// Create a new validation path(s) to include all steps leading to this node, including
     /// the node itself. If the node can be traced back to several flows, each flow will
-    /// be included in the separate plan.
+    /// be included in the separate path.
     pub fn node_backtrace(
         ctx: Context<'canvas, NodeMeta>,
         idx: NodeId,
-    ) -> BacktraceResult<'canvas, NodeMeta> {
+    ) -> Result<BacktraceResult<'canvas, NodeMeta>, NonexistentElementError> {
+        let original_node_idx = idx;
+        let mut errors = SmallVec::<[_; 32]>::new();
+
+        if ctx.nodes.get(original_node_idx.get() as usize).is_none() {
+            return Err(NonexistentElementError);
+        };
+
+        type Path = SmallVec<[EdgeAndNode; 32]>;
+
+        // Array of paths. Each path is a separate flow that leads to the node.
+        let mut paths = SmallVec::<[_; 32]>::new();
+        let mut connected_nodes_buf = SmallVec::<[_; 32]>::new();
+        let mut unfinished_path_idx = SmallVec::<[usize; 32]>::new();
+
+        // Find the edges that lead to the original node and make them the starting points
+        // for the paths.
+        ctx.nodes_connected_to(original_node_idx, &mut connected_nodes_buf);
+        unfinished_path_idx.reserve(connected_nodes_buf.len());
+        for &edge_node in &connected_nodes_buf {
+            let mut path = SmallVec::<[_; 32]>::new();
+            path.push(edge_node);
+            unfinished_path_idx.push(paths.len());
+            paths.push(path);
+        }
+
+        // Traverse the unfinished flows from the original node.
+        while !unfinished_path_idx.is_empty() {
+            // Unfinished paths are the paths that have not reached the end yet.
+            // We look into them to see if they have more nodes to connect.
+            for path_idx in unfinished_path_idx.clone() {
+                // Closure to add a node to the path, validating for cycles.
+                let mut add_node = |path_idx, path: &mut Path, edge_node: EdgeAndNode| {
+                    if edge_node.node == original_node_idx {
+                        // The loop is detected. This is a cycle for this path.
+                        errors.push(NodeBacktraceError::Cycle(std::mem::take(path).into_vec()));
+                        // `into_vec` clear the path. Clearing marks the path as invalid.
+                    } else {
+                        path.push(edge_node);
+                        unfinished_path_idx.push(path_idx);
+                    }
+                };
+
+                let last = *paths[path_idx]
+                    .last()
+                    .expect("all paths have at least one node");
+                ctx.nodes_connected_to(last.node, &mut connected_nodes_buf);
+
+                let first_node = if let Some(first_node) = connected_nodes_buf.pop() {
+                    first_node
+                } else {
+                    // The node is not connected to anything. This is the end of the path.
+                    continue;
+                };
+
+                // Rest of the found nodes have different logic than the first one.
+                // We need to duplicate the path, as it will diverge at this point for
+                // each found node.
+                for &remaining_node in &connected_nodes_buf {
+                    let mut new_path = paths[path_idx].clone();
+                    add_node(paths.len(), &mut new_path, remaining_node);
+                    paths.push(new_path);
+                }
+
+                // Add the first node to the original path.
+                add_node(path_idx, &mut paths[path_idx], first_node);
+            }
+        }
+
+        let mut result = Vec::with_capacity(paths.len());
+        // Check that all paths lead to a root node.
+        for path in paths {
+            if let Some(&last) = path.last() {
+                let is_root = ctx.nodes.get(last.node.get() as usize).unwrap().is_root();
+                if !is_root {
+                    errors.push(NodeBacktraceError::NoInput(path.into_vec()));
+                } else {
+                    // The path is valid.
+                    result.push(Self::new_for_edge_node(ctx, &path));
+                }
+            } else {
+                // Path was marked as invalid, we can ignore it.
+            }
+        }
+
+        Ok(BacktraceResult {
+            valid_paths: result,
+            errors: errors.into_vec(),
+        })
+    }
+
+    fn new_for_edge_node(ctx: Context<'canvas, NodeMeta>, edge_node: &[EdgeAndNode]) -> Self {
         todo!()
     }
 
@@ -190,7 +321,7 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
 }
 
 pub struct BacktraceResult<'canvas, NodeMeta> {
-    valid_plans: Vec<ValidationPlan<'canvas, NodeMeta>>,
+    valid_paths: Vec<ValidationPlan<'canvas, NodeMeta>>,
     errors: Vec<NodeBacktraceError>,
 }
 
@@ -199,15 +330,15 @@ pub struct TypeDeterminatorError {
 }
 
 pub enum NodeBacktraceError {
-    /// The node is not a part of the validation plan.
-    NotFound,
-
     /// The node is not connected to the data source (input, or root node).
-    NoInput,
+    NoInput(Vec<EdgeAndNode>),
 
     /// Node is a part of a cycle.
-    Cycle(Vec<NodeId>),
+    Cycle(Vec<EdgeAndNode>),
 }
+
+#[derive(Debug)]
+pub struct NonexistentElementError;
 
 /// Type conflict error that is created during the type determination stage.
 #[derive(Debug)]

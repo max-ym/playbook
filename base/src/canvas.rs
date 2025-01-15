@@ -85,6 +85,10 @@ impl<Meta> Node<Meta> {
     pub fn is_predicate(&self) -> bool {
         matches!(self.stub, NodeStub::Func(_))
     }
+
+    pub fn is_root(&self) -> bool {
+        self.stub.is_root()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,10 +100,35 @@ pub struct Pin {
     pub order: u8,
 }
 
+impl Pin {
+    /// Construct a zero pin. It has zeroed node ID and order.
+    pub(crate) const fn zero() -> Pin {
+        Pin {
+            node_id: Id(0),
+            order: 0,
+        }
+    }
+
+    /// Construct a pin with only the node ID set, and order set to zero.
+    pub(crate) const fn only_node_id(node_id: Id) -> Pin {
+        Pin { node_id, order: 0 }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
     pub from: Pin,
     pub to: Pin,
+}
+
+impl Edge {
+    /// Construct edge for binary search of the node in sorted array.
+    pub(crate) const fn binary_search_from(node_id: Id) -> Self {
+        Self {
+            from: Pin::only_node_id(node_id),
+            to: Pin::zero(),
+        }
+    }
 }
 
 /// A unique identifier for a node or edge.
@@ -136,6 +165,10 @@ impl Id {
         let step = rng.next_u32() % Self::RND_MAX_STEP;
         let new_id = id.unprefix().checked_add(step)?;
         Some(Id(new_id | prefix))
+    }
+
+    pub(crate) fn from_u32(id: u32) -> Id {
+        Id(id)
     }
 
     /// Remove all prefix bits from the ID.
