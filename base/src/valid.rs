@@ -1,9 +1,11 @@
+use log::trace;
 use smallvec::SmallVec;
 
-use crate::canvas::{Edge, Id, Node, PrimitiveType, PrimitiveTypeConst, Value};
+use crate::canvas::{Edge, Id, Node, Pin, PrimitiveType, PrimitiveTypeConst, Value};
 
 type NodeId = Id;
-type EdgeId = Id;
+
+type EdgeIdx = usize;
 
 /// Chains are individual groups of flows that connect one input,
 /// pass the data through a series of transformations (nodes), and at the end
@@ -38,8 +40,8 @@ pub struct ValidationPlan<'canvas, NodeMeta> {
     /// Input data types are crucial for the validation plan to be able to validate the data,
     /// and should be present in `data_types` field from the creation of the plan, even before
     /// type deduction stage.
-    inputs: SmallVec<[EdgeId; 1]>,
-    outputs: SmallVec<[EdgeId; 1]>,
+    inputs: SmallVec<[Pin; 1]>,
+    outputs: SmallVec<[Pin; 1]>,
 
     /// Sorted array of all data types for the edges in the plan.
     data_types: Vec<EdgeDataType>,
@@ -47,7 +49,7 @@ pub struct ValidationPlan<'canvas, NodeMeta> {
 
 #[derive(Debug)]
 struct EdgeDataType {
-    edge_id: EdgeId,
+    edge_idx: EdgeIdx,
     data_type: PrimitiveType,
 }
 
@@ -146,7 +148,7 @@ impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
         let place = self.binary_search_edge_place(node_id);
         while self.edges[place].from.node_id == node_id {
             let node = self.edges[place].from.node_id;
-            let edge = EdgeId::from_u32(place as _);
+            let edge = EdgeIdx::from(place);
             connected.push(EdgeAndNode { edge, node });
         }
     }
@@ -160,11 +162,32 @@ impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
             Err(v) => v,
         }
     }
+
+    /// Get predicate plan for the given node.
+    fn predicate_plan_for(&self, node_id: NodeId) -> &PredicatePlan<'canvas> {
+        let place = self
+            .predicate_plans
+            .binary_search_by(|plan| plan.id.cmp(&node_id))
+            .unwrap();
+        &self.predicate_plans[place]
+    }
+
+    fn node(&self, node_id: NodeId) -> &Node<NodeMeta> {
+        let pos = self
+            .nodes
+            .binary_search_by(|node| node.id.cmp(&node_id))
+            .unwrap();
+        &self.nodes[pos]
+    }
+
+    fn edge_idx(&self, edge: Edge) -> Option<EdgeIdx> {
+        self.edges.binary_search_by(|e| e.cmp(&edge)).ok()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct EdgeAndNode {
-    edge: EdgeId,
+    edge: EdgeIdx,
     node: NodeId,
 }
 
@@ -253,7 +276,7 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
                     errors.push(NodeBacktraceError::NoInput(path.into_vec()));
                 } else {
                     // The path is valid.
-                    result.push(Self::new_for_edge_node(ctx, &path));
+                    result.push(Self::new_for_edge_node_rev(ctx, &path));
                 }
             } else {
                 // Path was marked as invalid, we can ignore it.
@@ -266,8 +289,86 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
         })
     }
 
-    fn new_for_edge_node(ctx: Context<'canvas, NodeMeta>, edge_node: &[EdgeAndNode]) -> Self {
-        todo!()
+    /// Create a plan from all nodes and edges from the context that are part of the given path.
+    /// This accepts reversed order, generated from backtracing from selected node up to
+    /// the root.
+    fn new_for_edge_node_rev(ctx: Context<'canvas, NodeMeta>, edge_node: &[EdgeAndNode]) -> Self {
+        let mut nodes = Vec::with_capacity(edge_node.len());
+        let mut edges = Vec::with_capacity(edge_node.len());
+        for edge_node in edge_node.iter().rev() {
+            nodes.push(&ctx.nodes[edge_node.node.get() as usize]);
+            edges.push(&ctx.edges[edge_node.edge]);
+        }
+
+        trace!("Make a single chain to represent the path");
+        let chain = Chain {
+            nodes: nodes.iter().map(|node| node.id).collect(),
+        };
+
+        trace!("Define inputs for the plan");
+        let root = nodes.first().unwrap();
+        debug_assert!(root.is_root());
+        let after_root = nodes.iter().skip(1).next()
+            .expect("we cannot compute without nodes. This is a bug, as the node array should be verified before this.");
+        let inputs = Self::count_node_io(ctx, after_root.id).0;
+        let last = nodes
+            .last()
+            .expect("there are elements per operations above");
+        let outputs = Self::count_node_io(ctx, last.id).1;
+
+        trace!("Collect inputs and outputs as pins");
+        let mut inputs_vec = SmallVec::with_capacity(inputs);
+        for i in 0..inputs {
+            inputs_vec.push(Pin {
+                node_id: after_root.id,
+                order: i as _,
+            });
+        }
+        let mut outputs_vec = SmallVec::with_capacity(outputs);
+        for i in 0..outputs {
+            outputs_vec.push(Pin {
+                node_id: last.id,
+                order: i as _,
+            });
+        }
+
+        trace!("Set input data types");
+        // Since our plan starts with a root node, we set "Record" data type for all inputs.
+        let mut data_types = Vec::with_capacity(inputs);
+        for i in 0..inputs {
+            data_types.push(EdgeDataType {
+                edge_idx: ctx
+                    .edge_idx(Edge {
+                        from: Pin::only_node_id(root.id), // this will work as root node has only one output
+                        to: inputs_vec[i],
+                    })
+                    .unwrap(),
+                data_type: PrimitiveType::Record,
+            });
+        }
+
+        Self {
+            nodes,
+            edges,
+            chains: vec![chain],
+            steps: vec![],
+            inputs: inputs_vec,
+            outputs: outputs_vec,
+            data_types,
+        }
+    }
+
+    fn count_node_io(ctx: Context<NodeMeta>, node_id: NodeId) -> (usize, usize) {
+        let node = ctx.node(node_id);
+        if node.is_predicate() {
+            let plan = &ctx.predicate_plan_for(node_id).validation_plan;
+            (plan.inputs.len(), plan.outputs.len())
+        } else if let (Some(inputs), Some(outputs)) = (node.static_inputs(), node.static_outputs())
+        {
+            (inputs, outputs)
+        } else {
+            unreachable!("Reaching this means there are no mechanics defined to count IO for the node. Missing impl?");
+        }
     }
 
     /// Create a new validation plan describing all flows in a canvas, to validate it as
@@ -312,9 +413,9 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
     /// Returns `None` if the type was not determined.
     ///
     /// You should run [determine_types](Self::determine_types) to fill in the types.
-    pub fn edge_data_type(&self, edge: EdgeId) -> Option<&PrimitiveType> {
+    pub fn edge_data_type(&self, edge: EdgeIdx) -> Option<&PrimitiveType> {
         self.data_types
-            .binary_search_by(|x| x.edge_id.cmp(&edge))
+            .binary_search_by(|x| x.edge_idx.cmp(&edge))
             .ok()
             .map(|idx| &self.data_types[idx].data_type)
     }
@@ -344,7 +445,7 @@ pub struct NonexistentElementError;
 #[derive(Debug)]
 pub struct TypeConflict {
     /// Edge that has a type conflict.
-    edge: EdgeId,
+    edge: EdgeIdx,
 
     /// Found type for the edge per output node.
     found: PrimitiveType,

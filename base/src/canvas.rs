@@ -89,6 +89,24 @@ impl<Meta> Node<Meta> {
     pub fn is_root(&self) -> bool {
         self.stub.is_root()
     }
+
+    /// Count of input pins of the node, if statically known.
+    pub const fn static_inputs(&self) -> Option<usize> {
+        if let Some(v) = self.stub.static_inputs() {
+            Some(v.len())
+        } else {
+            None
+        }
+    }
+
+    /// Count of output pins of the node, if statically known.
+    pub const fn static_outputs(&self) -> Option<usize> {
+        if let Some(v) = self.stub.static_outputs() {
+            Some(v.len())
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -165,10 +183,6 @@ impl Id {
         let step = rng.next_u32() % Self::RND_MAX_STEP;
         let new_id = id.unprefix().checked_add(step)?;
         Some(Id(new_id | prefix))
-    }
-
-    pub(crate) fn from_u32(id: u32) -> Id {
-        Id(id)
     }
 
     /// Remove all prefix bits from the ID.
