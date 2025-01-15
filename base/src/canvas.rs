@@ -231,8 +231,8 @@ pub enum NodeStub {
     /// This allows to drop the data.
     /// In parser, all data flows should end either by
     /// Drop or Output nodes. Otherwise, error “unfinished data flow”.
-    ///  This is to ensure that user hadn’t forgotten to match all the data.
-    ///  We require to explicitly tell to drop the data if that data is not needed.
+    /// This is to ensure that user hadn’t forgotten to match all the data.
+    /// We require to explicitly tell to drop the data if that data is not needed.
     Drop,
 
     /// Output the data into some external process.
