@@ -279,7 +279,7 @@ impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
                     result.push(Self::new_for_edge_node_rev(ctx, &path));
                 }
             } else {
-                // Path was marked as invalid, we can ignore it.
+                // Empty - path was marked as invalid somewhere above, we can ignore it.
             }
         }
 
