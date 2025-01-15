@@ -270,18 +270,29 @@ pub enum NodeStub {
 
     /// Map values of one type to another values of possibly other type. Maps should be exhaustive.
     Map {
-        tuples: SmallVec<[(Pat, Value); 1]>,
-        wildcard: Option<Value>,
+        /// Array of patterns to match input tuples, and corresponding output tuples.
+        tuples: SmallVec<[(Pat, SmallVec<[Value; 1]>); 1]>,
+        wildcard: SmallVec<[Value; 1]>, // optional
     },
 
     /// List of values of some type. Can be used for filtering or
     /// values validation (e.g. to find invalid/unexpected values).
+    /// List can also accept tuples, and then this is a list of valid tuples.
+    /// In such cases, input pins represent each tuple element. Number of inputs and
+    /// outputs should be the same.
     ///
-    /// All values should be of the same type.
-    List { values: SmallVec<[Value; 1]> },
+    /// For each item, values should be of the same type.
+    List {
+        /// List should have at least one value.
+        values: SmallVec<[SmallVec<[Value; 1]>; 1]>,
+    },
 
     /// Check the boolean predicate and execute either branch.
-    IfElse { condition: Predicate },
+    IfElse {
+        /// Inputs number excluding the condition predicate inputs.
+        inputs: PinOrder,
+        condition: Predicate,
+    },
 
     /// Check Result and execute either branch passing the corresponding value.
     OkOrErr,
@@ -289,6 +300,9 @@ pub enum NodeStub {
     /// Match the input values and execute appropriate branch.
     /// Match should be exhaustive (or with wildcard).
     Match {
+        /// Number of inputs of the node.
+        inputs: PinOrder,
+
         values: SmallVec<[(Pat, Value); 1]>,
         wildcard: Option<Value>,
     },
@@ -349,14 +363,24 @@ pub enum NodeStub {
     /// To allow saving the project that is WIP as to pass exhaustiveness
     /// (or other?) validations.
     /// Project with outstanding Todo nodes cannot be “deployed”.
+    ///
+    /// Todo can have many inputs and outputs, which just directly pass the value(s) forward.
     Todo {
         /// Message to display when crashing, can be empty (then ignored).
         msg: CompactString,
+
+        /// Number of inputs of the node. This effectively also is the number of outputs.
+        inputs: PinOrder,
     },
 
     /// Just some comment, for visuals. Can have many inputs and outputs,
     /// which just directly pass the value(s) forward. Must have the same number of ins and outs.
-    Comment(CompactString),
+    Comment {
+        msg: CompactString,
+
+        /// Number of inputs of the node. This effectively also is the number of outputs.
+        inputs: PinOrder,
+    },
 }
 
 impl NodeStub {
@@ -369,35 +393,35 @@ impl NodeStub {
         use PrimitiveTypeConst as PT;
         let some: &[Option<PT>] = match self {
             File => &[Some(PT::File)],
-            SplitBy { .. } => &[Some(PT::Array(&[PT::Record]))],
-            Input { .. } => &[None],
+            SplitBy { .. } => &[Some(PT::Array(&PT::Record))],
+            Input { .. } => &[Some(PT::Str)],
             Drop => &[],
             Output { .. } => &[],
             StrOp(_) => &[Some(PT::Str)],
             Compare { .. } => &[Some(PT::Bool)],
             Ordering => &[Some(PT::Ordering)],
-            Regex(_) => &[None],
-            FindRecord(_) => &[Some(PT::Result(&(PT::Array(&[PT::Record]), PT::Unit)))],
-            Map { .. } => &[None],
-            List { .. } => &[None],
-            IfElse { .. } => &[None, None],
+            Regex(_) => return None,
+            FindRecord(_) => &[Some(PT::Result(&(PT::Array(&PT::Record))))],
+            Map { .. } => return None,
+            List { .. } => return None,
+            IfElse { .. } => return None,
             OkOrErr => &[None, None],
             Match { .. } => return None,
             Func(_) => return None,
             ParseDateTime { date, time, .. } => match (date, time) {
-                (true, false) => &[Some(PT::Result(&(PT::Date, PT::Unit)))],
-                (false, true) => &[Some(PT::Result(&(PT::Time, PT::Unit)))],
-                (true, true) => &[Some(PT::Result(&(PT::DateTime, PT::Unit)))],
-                (false, false) => &[Some(PT::Result(&(PT::Unit, PT::Unit)))],
+                (true, false) => &[Some(PT::Result(&(PT::Date)))],
+                (false, true) => &[Some(PT::Result(&(PT::Time)))],
+                (true, true) => &[Some(PT::Result(&(PT::DateTime)))],
+                (false, false) => &[Some(PT::Result(&(PT::Unit)))],
             },
-            ParseMonetary { .. } => &[Some(PT::Result(&(PT::Moneraty, PT::Unit)))],
-            ParseInt { .. } => &[Some(PT::Result(&(PT::Int, PT::Unit)))],
+            ParseMonetary { .. } => &[Some(PT::Result(&(PT::Moneraty)))],
+            ParseInt { .. } => &[Some(PT::Result(&(PT::Int)))],
             Constant(_) => &[None],
             Crash { .. } => &[],
             OkOrCrash { .. } => &[None],
             Unreachable { .. } => &[],
-            Todo { .. } => &[],
-            Comment(_) => &[None],
+            Todo { .. } => return None,
+            Comment { .. } => return None,
         };
         Some(some)
     }
@@ -406,34 +430,35 @@ impl NodeStub {
     /// some input type should be the same as some output type, this function
     /// returns an array of tuples, where each tuple contains the index of the input
     /// and the index of the output pin that should be the same.
-    pub const fn io_relation(&self) -> &'static [(u8, u8)] {
+    pub const fn static_io_relation(&self) -> IoRelation {
+        use IoRelation::*;
         use NodeStub::*;
         match self {
-            File => &[],
-            SplitBy { .. } => &[],
-            Input { .. } => &[],
-            Drop => &[],
-            Output { .. } => &[],
-            StrOp(_) => &[(0, 1)],
-            Compare { .. } => &[],
-            Ordering => &[],
-            Regex(_) => &[],
-            FindRecord(_) => &[],
-            Map { .. } => &[],
-            List { .. } => &[(0, 1)],
-            IfElse { .. } => &[],
-            OkOrErr => &[],
-            Match { .. } => &[],
-            Func(_) => &[],
-            ParseDateTime { .. } => &[],
-            ParseMonetary { .. } => &[],
-            ParseInt { .. } => &[],
-            Constant(_) => &[],
-            Crash { .. } => &[],
-            OkOrCrash { .. } => &[],
-            Unreachable { .. } => &[],
-            Todo { .. } => &[],
-            Comment(_) => &[],
+            File => Unspecified,
+            SplitBy { .. } => Unspecified,
+            Input { .. } => Unspecified,
+            Drop => Unspecified,
+            Output { .. } => Unspecified,
+            StrOp(_) => FullSymmetry,
+            Compare { .. } => Same(&[(0, 1)]),
+            Ordering => Same(&[(0, 1)]),
+            Regex(_) => Unspecified,
+            FindRecord(_) => Unspecified,
+            Map { .. } => Unspecified,
+            List { .. } => FullSymmetry,
+            IfElse { .. } => Unspecified,
+            OkOrErr => Same(&[(1, 2)]),
+            Match { .. } => Unspecified,
+            Func(_) => Unspecified,
+            ParseDateTime { .. } => Unspecified,
+            ParseMonetary { .. } => Unspecified,
+            ParseInt { .. } => Unspecified,
+            Constant(_) => Unspecified,
+            Crash { .. } => Unspecified,
+            OkOrCrash { .. } => FullSymmetry,
+            Unreachable { .. } => Unspecified,
+            Todo { .. } => FullSymmetry,
+            Comment { .. } => FullSymmetry,
         }
     }
 
@@ -455,11 +480,11 @@ impl NodeStub {
             Ordering => &[None, None],
             Regex(_) => &[Some(PT::Str)],
             FindRecord(_) => &[Some(PT::File)],
-            Map { .. } => &[None],
-            List { .. } => &[None],
-            IfElse { .. } => &[None],
+            Map { .. } => return None,
+            List { .. } => return None,
+            IfElse { .. } => return None,
             OkOrErr => &[None],
-            Match { .. } => &[None],
+            Match { .. } => return None,
             Func(_) => return None,
             ParseDateTime { .. } => &[Some(PT::Str)],
             ParseMonetary { .. } => &[Some(PT::Str)],
@@ -468,10 +493,65 @@ impl NodeStub {
             Crash { .. } => &[None],
             OkOrCrash { .. } => &[None],
             Unreachable { .. } => &[None],
-            Todo { .. } => &[None],
-            Comment(_) => &[None],
+            Todo { .. } => return None,
+            Comment { .. } => return None,
         };
         Some(some)
+    }
+
+    pub const fn static_total_pin_count(&self) -> Option<usize> {
+        match (self.static_inputs(), self.static_outputs()) {
+            (Some(inputs), Some(outputs)) => Some(inputs.len() + outputs.len()),
+            _ => None,
+        }
+    }
+
+    pub fn total_pin_count(&self) -> usize {
+        if let Some(v) = self.static_total_pin_count() {
+            return v;
+        }
+
+        self.input_pin_count() + self.output_pin_count()
+    }
+
+    pub fn output_pin_count(&self) -> usize {
+        if let Some(v) = self.static_outputs() {
+            return v.len();
+        }
+
+        use NodeStub::*;
+        match self {
+            Comment { .. } | Todo { .. } => self.input_pin_count(),
+            Func(predicate) => predicate.output_pin_count(),
+            Match { values, .. } => values.len(),
+            List { .. } => self.input_pin_count(),
+            IfElse { inputs, .. } => *inputs as usize,
+            Regex(regex) => regex.captures_len(),
+            Map { tuples, .. } => tuples[0].1.len(),
+            _ => unreachable!("total_pin_count should be implemented for {self:?}"),
+        }
+    }
+
+    pub fn input_pin_count(&self) -> usize {
+        if let Some(v) = self.static_inputs() {
+            return v.len();
+        }
+
+        use NodeStub::*;
+        match self {
+            Comment { inputs, .. } | Todo { inputs, .. } => *inputs as usize,
+            Func(predicate) => predicate.inputs.len(),
+            Match { inputs, .. } => *inputs as usize,
+            List { values } => values[0].len(),
+            IfElse { inputs, condition } => condition.inputs.len() + *inputs as usize,
+            Map { tuples, .. } => tuples.len(),
+            _ => unreachable!("input_pin_count should be implemented for {self:?}"),
+        }
+    }
+
+    /// Index at which the output pins start counting.
+    pub fn output_pin_start_idx(&self) -> usize {
+        self.input_pin_count()
     }
 
     /// Whether the node is a root node.
@@ -480,10 +560,265 @@ impl NodeStub {
     }
 
     pub const fn is_predicate(&self) -> bool {
-        matches!(self, NodeStub::Func(_))
+        use NodeStub::*;
+        matches!(self, Func(_) | IfElse { .. } | FindRecord(_))
     }
 }
 
+pub enum IoRelation {
+    /// These pin numbers should be the same type.
+    Same(&'static [(PinOrder, PinOrder)]),
+
+    /// All input pins have matching output pins.
+    FullSymmetry,
+
+    /// Pins have dynamic relation and/or number, or no relation at all.
+    Unspecified,
+}
+
+/// Result of resolution of pin types of some node.
+pub struct ResolvePinTypes {
+    pins: Vec<Option<PrimitiveType>>,
+}
+
+impl ResolvePinTypes {
+    /// Resolve the pin types of the given node.
+    /// The `set` parameter is a vector holding the resolved types of the input and output pins.
+    /// Resolver cannot change those but it can use them to determine the types of other pins.
+    /// Vector should be the same length as the number of pins of the node.
+    pub fn resolve(
+        node: &NodeStub,
+        mut pins: Vec<Option<PrimitiveType>>,
+    ) -> Result<Self, PinResolutionError> {
+        if pins.len() != node.total_pin_count() {
+            return Err(PinResolutionError::PinNumberMismatch);
+        }
+
+        ResolvePinTypes::prefill_with_static(node, &mut pins)?;
+
+        let result = match node.static_io_relation() {
+            IoRelation::Same(pairs) => {
+                for &(i, o) in pairs {
+                    let (i, o) = (i as usize, o as usize);
+                    let any = ResolvePinTypes::any(&pins[i], &pins[o]);
+                    pins[i] = any.clone();
+                    pins[o] = any;
+                }
+
+                Self { pins }
+            }
+            IoRelation::FullSymmetry => {
+                let output_idx = node.output_pin_start_idx();
+
+                let (ins, outs) = pins.split_at_mut(output_idx);
+                for (i, o) in ins.iter_mut().zip(outs.iter_mut()) {
+                    ResolvePinTypes::unite(i, o)?;
+                }
+
+                Self { pins }
+            }
+            IoRelation::Unspecified => {
+                use NodeStub::*;
+                match node {
+                    Regex { .. } => {
+                        // All should be strings.
+                        for pin in pins.iter_mut() {
+                            ResolvePinTypes::match_types_write(PrimitiveType::Str, pin)?;
+                        }
+                        Self { pins }
+                    }
+                    Map { tuples, .. } => {
+                        let first = &tuples
+                            .first()
+                            .expect("Map should have at least one tuple")
+                            .1;
+                        for (i, val) in first.iter().enumerate() {
+                            ResolvePinTypes::match_types_write(val.type_of(), &mut pins[i])?;
+                        }
+
+                        // Input types should be already provided externally.
+                        Self { pins }
+                    }
+                    IfElse { condition, inputs } => {
+                        // Output pins have groups for true and false branch.
+                        // Otherwise, each of that group is symmetric to input pins, except for
+                        // the first ones that go to the condition predicate.
+
+                        let after_predicate_idx = condition.input_pin_count();
+                        let branch_size = *inputs as usize;
+                        let (predicate_pins, rest) = pins.split_at_mut(after_predicate_idx);
+                        let (input_pins, rest) = rest.split_at_mut(branch_size);
+                        let (true_branch, false_branch) = rest.split_at_mut(branch_size);
+                        debug_assert_eq!(input_pins.len(), branch_size);
+                        debug_assert_eq!(true_branch.len(), branch_size);
+                        debug_assert_eq!(false_branch.len(), branch_size);
+
+                        // Resolve input data pins (exclude predicate).
+                        for (i, (t, f)) in true_branch
+                            .iter_mut()
+                            .zip(false_branch.iter_mut())
+                            .enumerate()
+                        {
+                            if let Some(ty) = input_pins[i].as_ref() {
+                                ResolvePinTypes::match_types_write(ty.clone(), t)?;
+                                ResolvePinTypes::match_types_write(ty.clone(), f)?;
+                            }
+                        }
+
+                        // Resolve predicate pins.
+                        for (i, ty) in condition.inputs.iter().enumerate() {
+                            ResolvePinTypes::match_types_write(
+                                ty.to_owned(),
+                                &mut predicate_pins[i],
+                            )?;
+                        }
+
+                        Self { pins }
+                    }
+                    Match { .. } => todo!(),
+                    Func { .. } => todo!(),
+                    Constant(value) => {
+                        let ty = value.type_of();
+                        debug_assert_eq!(pins.len(), 1);
+                        ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
+
+                        Self { pins }
+                    }
+                    _ => Self { pins },
+                }
+            }
+        };
+        result.ensure_resolved()
+    }
+
+    /// Prefill missing types per static information.
+    ///
+    /// # Panics
+    /// Pin count should be correct at this point. If it is not, this function will panic.
+    fn prefill_with_static(
+        node: &NodeStub,
+        pins: &mut Vec<Option<PrimitiveType>>,
+    ) -> Result<(), PinResolutionError> {
+        let output_idx = node.output_pin_start_idx();
+
+        if let Some(static_inputs) = node.static_inputs() {
+            debug_assert_eq!(static_inputs.len(), output_idx);
+            for (i, t) in static_inputs.iter().copied().enumerate() {
+                if let Some(t) = t.map(Into::into) {
+                    if pins[i].is_none() {
+                        pins[i] = Some(t);
+                    } else if pins[i] != Some(t) {
+                        return Err(PinResolutionError::UnionConflict);
+                    }
+                }
+            }
+        }
+
+        if let Some(static_outputs) = node.static_outputs() {
+            for (i, t) in static_outputs.iter().copied().enumerate() {
+                let i = i + output_idx;
+                if let Some(t) = t.map(Into::into) {
+                    if pins[i].is_none() {
+                        pins[i] = Some(t);
+                    } else if pins[i] != Some(t) {
+                        return Err(PinResolutionError::UnionConflict);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// If either of the pins is `None`, they are unified to the same type.
+    /// If both are `Some`, they are validated to be the same type.
+    /// If both are None, they are left as None and false is returned.
+    /// True is returned if the types were unified.
+    fn unite(
+        a: &mut Option<PrimitiveType>,
+        b: &mut Option<PrimitiveType>,
+    ) -> Result<bool, UnionConflict> {
+        if let Some(a) = a {
+            if let Some(b) = b {
+                if a != b {
+                    return Err(UnionConflict);
+                }
+                Ok(false)
+            } else {
+                *b = Some(a.clone());
+                Ok(true)
+            }
+        } else if let Some(b) = b {
+            *a = Some(b.clone());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// If `b` is `Some`, it should be equal to `a`.
+    fn match_types_write(
+        a: PrimitiveType,
+        b: &mut Option<PrimitiveType>,
+    ) -> Result<bool, UnionConflict> {
+        if let Some(b) = b {
+            if &a != b {
+                return Err(UnionConflict);
+            }
+            Ok(false)
+        } else {
+            *b = Some(a);
+            Ok(true)
+        }
+    }
+
+    fn any(a: &Option<PrimitiveType>, b: &Option<PrimitiveType>) -> Option<PrimitiveType> {
+        match (a, b) {
+            (Some(a), _) => Some(a.clone()),
+            (_, Some(b)) => Some(b.clone()),
+            _ => None,
+        }
+    }
+
+    /// Check that all pins are resolved.
+    fn ensure_resolved(self) -> Result<Self, PinResolutionError> {
+        if self.is_resolved() {
+            Ok(self)
+        } else {
+            Err(PinResolutionError::RemainingUnknownPins)
+        }
+    }
+
+    fn is_resolved(&self) -> bool {
+        for pin in self.pins.iter() {
+            if pin.is_none() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+struct UnionConflict;
+
+impl From<UnionConflict> for PinResolutionError {
+    fn from(_: UnionConflict) -> Self {
+        PinResolutionError::UnionConflict
+    }
+}
+
+#[derive(Debug)]
+pub enum PinResolutionError {
+    PinNumberMismatch,
+
+    /// Provided types of the pins cannot be resolved due to conflicting requirements.
+    UnionConflict,
+
+    /// Cannot resolve all pin types for lacking information.
+    RemainingUnknownPins,
+}
+
+/// Pattern for matching values.
 #[derive(Debug)]
 pub struct Pat {}
 
@@ -501,11 +836,41 @@ pub enum Value {
     Ordering(std::cmp::Ordering),
     Array(Vec<Value>),
     Predicate(Predicate),
-    Result(Box<(Value, Value)>),
-    Option(Box<Value>),
+    Result {
+        // Value is propagated only on Ok, but we still always carry it around for type resolution.
+        value: Box<Value>,
+        is_ok: bool,
+    },
+    Option {
+        // We still carry it around for type resolution and possibly some logs.
+        value: Box<Value>,
+        is_some: bool,
+    },
 }
 
-#[derive(Debug)]
+impl Value {
+    pub fn type_of(&self) -> PrimitiveType {
+        use Value::*;
+        match self {
+            Int(_) => PrimitiveType::Int,
+            Uint(_) => PrimitiveType::Uint,
+            Unit => PrimitiveType::Unit,
+            Moneraty(_) => PrimitiveType::Moneraty,
+            Date(_) => PrimitiveType::Date,
+            DateTime(_) => PrimitiveType::DateTime,
+            Time(_) => PrimitiveType::Time,
+            Bool(_) => PrimitiveType::Bool,
+            Str(_) => PrimitiveType::Str,
+            Ordering(_) => PrimitiveType::Ordering,
+            Array(v) => PrimitiveType::Array(Box::new(v[0].type_of())),
+            Predicate(p) => PrimitiveType::Predicate(Box::new(p.clone())),
+            Result { value, .. } => PrimitiveType::Result(Box::new(value.type_of())),
+            Option { value, .. } => PrimitiveType::Option(Box::new(value.type_of())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrimitiveType {
     Int,
     Uint,
@@ -521,11 +886,11 @@ pub enum PrimitiveType {
     Record,
     Array(Box<PrimitiveType>),
     Predicate(Box<Predicate>),
-    Result(Box<(PrimitiveType, PrimitiveType)>),
+    Result(Box<PrimitiveType>),
     Option(Box<PrimitiveType>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveTypeConst {
     Int,
     Uint,
@@ -539,10 +904,34 @@ pub enum PrimitiveTypeConst {
     Ordering,
     File,
     Record,
-    Array(&'static [PrimitiveTypeConst]),
+    Array(&'static PrimitiveTypeConst),
     Predicate(&'static PredicateConst),
-    Result(&'static (PrimitiveTypeConst, PrimitiveTypeConst)),
+    Result(&'static PrimitiveTypeConst),
     Option(&'static PrimitiveTypeConst),
+}
+
+impl From<PrimitiveTypeConst> for PrimitiveType {
+    fn from(pt: PrimitiveTypeConst) -> Self {
+        use PrimitiveTypeConst as PT;
+        match pt {
+            PT::Int => PrimitiveType::Int,
+            PT::Uint => PrimitiveType::Uint,
+            PT::Unit => PrimitiveType::Unit,
+            PT::Moneraty => PrimitiveType::Moneraty,
+            PT::Date => PrimitiveType::Date,
+            PT::DateTime => PrimitiveType::DateTime,
+            PT::Time => PrimitiveType::Time,
+            PT::Bool => PrimitiveType::Bool,
+            PT::Str => PrimitiveType::Str,
+            PT::Ordering => PrimitiveType::Ordering,
+            PT::File => PrimitiveType::File,
+            PT::Record => PrimitiveType::Record,
+            PT::Array(&v) => PrimitiveType::Array(Box::new(v.into())),
+            PT::Predicate(&pc) => PrimitiveType::Predicate(Box::new(pc.into())),
+            PT::Result(&a) => PrimitiveType::Result(Box::new(a.into())),
+            PT::Option(&v) => PrimitiveType::Option(Box::new(v.into())),
+        }
+    }
 }
 
 /// Predicate is effectively some function that can take and output
@@ -555,16 +944,39 @@ pub enum PrimitiveTypeConst {
 ///
 /// External projects are qualified if they have at least one pin for the node
 /// they will be represented with. They themselves, as functions, should be pure and deterministic.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Predicate {
     pub inputs: SmallVec<[PrimitiveType; 1]>,
     pub outputs: SmallVec<[PrimitiveType; 1]>,
 }
 
-#[derive(Debug)]
+impl Predicate {
+    pub fn total_pin_count(&self) -> usize {
+        self.input_pin_count() + self.output_pin_count()
+    }
+
+    pub fn input_pin_count(&self) -> usize {
+        self.inputs.len()
+    }
+
+    pub fn output_pin_count(&self) -> usize {
+        self.outputs.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PredicateConst {
-    pub inputs: &'static [PrimitiveType],
-    pub outputs: &'static [PrimitiveType],
+    pub inputs: &'static [PrimitiveTypeConst],
+    pub outputs: &'static [PrimitiveTypeConst],
+}
+
+impl From<PredicateConst> for Predicate {
+    fn from(pc: PredicateConst) -> Self {
+        Self {
+            inputs: pc.inputs.iter().copied().map(Into::into).collect(),
+            outputs: pc.outputs.iter().copied().map(Into::into).collect(),
+        }
+    }
 }
 
 /// Operation to apply to a `String` input.
