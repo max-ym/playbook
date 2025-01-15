@@ -116,10 +116,16 @@ impl<'canvas, NodeMeta> Context<'canvas, NodeMeta> {
     }
 }
 
-impl<NodeMeta> ValidationPlan<'_, NodeMeta> {
+impl<'canvas, NodeMeta> ValidationPlan<'canvas, NodeMeta> {
     /// Create a new validation plan to include all steps leading to this node, including
     /// the node itself.
-    pub fn node_backtrace(ctx: Context<NodeMeta>, idx: NodeId) -> Result<Self, Todo> {
+    pub fn node_backtrace(ctx: Context<'canvas, NodeMeta>, idx: NodeId) -> Result<Self, Todo> {
+        todo!()
+    }
+
+    /// Create a new validation plan describing all flows in a canvas, to validate it as
+    /// a whole.
+    pub fn canvas_plan(ctx: Context<'canvas, NodeMeta>) -> Result<Self, Todo> {
         todo!()
     }
 
