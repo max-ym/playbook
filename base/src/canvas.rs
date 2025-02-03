@@ -14,7 +14,7 @@ pub struct Canvas<NodeMeta> {
     /// In a valid project, from these nodes the execution of the flow starts.
     /// Some nodes cannot function as a starting point of execution, but they are still
     /// considered root nodes, as they are not connected to any other node.
-    /// 
+    ///
     /// Note that this array stores all nodes that do not have a parent, even if they
     /// cannot function as a starting point of execution in the valid project.
     /// This array is later used by the validation to ensure that all nodes are reachable.
@@ -57,12 +57,16 @@ impl<NodeMeta> Canvas<NodeMeta> {
     }
 
     pub fn get_node(&self, id: Id) -> Option<&Node<NodeMeta>> {
+        self.node_id_to_idx(id).map(|idx| &self.nodes[idx as usize])
+    }
+
+    fn node_id_to_idx(&self, id: Id) -> Option<NodeIdx> {
         // Node array is sorted, so we can use binary search.
         debug_assert!(self.nodes.is_sorted_by_key(|n| n.id));
         self.nodes
             .binary_search_by_key(&id, |n| n.id)
             .ok()
-            .map(|idx| &self.nodes[idx])
+            .map(|v| v as NodeIdx)
     }
 
     pub fn remove_node(&mut self, id: Id) -> Option<Node<NodeMeta>> {
@@ -73,9 +77,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let idx = idx as NodeIdx;
         self.edges.retain(|e| e.from.0 != idx && e.to.0 != idx);
 
-        // Remove the node from the root nodes.
-        let root_node_idx = self.root_nodes.iter().position(|&n| n == idx)?;
-        self.root_nodes.swap_remove(root_node_idx);
+        self.unroot_node(idx);
 
         Some(node)
     }
@@ -92,7 +94,47 @@ impl<NodeMeta> Canvas<NodeMeta> {
             },
         })
     }
+
+    /// Add the edge to the canvas. This will return the index of the edge in the canvas.
+    /// If the edge already exists, the existing index is returned.
+    /// If the nodes referenced by the edge do not exist, this function will return an error.
+    /// 
+    /// This does not validate pin numbers. The validation for that is performed later on
+    /// validation/resolution step.
+    // NOTE: insertion performance is low for old nodes due to inserts onto the array beginning.
+    // Consider optimizing this if it becomes a bottleneck.
+    pub fn add_edge(&mut self, from: Pin, to: Pin) -> Result<EdgeIdx, NodeNotFoundError> {
+        let from_idx = self.node_id_to_idx(from.node_id).ok_or(NodeNotFoundError(from.node_id))?;
+        let to_idx = self.node_id_to_idx(to.node_id).ok_or(NodeNotFoundError(to.node_id))?;
+
+        let edge = EdgeInner {
+            from: (from_idx, from.order),
+            to: (to_idx, to.order),
+        };
+
+        let idx = match self.edges.binary_search(&edge) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                self.edges.insert(idx, edge);
+                idx
+            }
+        };
+
+        self.unroot_node(to_idx);
+
+        Ok(idx as EdgeIdx)
+    }
+
+    /// Remove the root node from the list of root nodes, if it is present.
+    fn unroot_node(&mut self, node: NodeIdx) {
+        if let Some(idx) = self.root_nodes.iter().position(|&n| n == node) {
+            self.root_nodes.swap_remove(idx);
+        }
+    }
 }
+
+#[derive(Debug)]
+pub struct NodeNotFoundError(pub Id);
 
 #[derive(Debug)]
 pub struct Node<Meta> {
@@ -234,7 +276,7 @@ impl Id {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NodeStub {
     /// A file that is accepted as the entry of the process.
     /// Project currently supports one file as an input,
@@ -855,10 +897,10 @@ pub enum PinResolutionError {
 }
 
 /// Pattern for matching values.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Pat {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Uint(u64),
@@ -1016,7 +1058,7 @@ impl From<PredicateConst> for Predicate {
 }
 
 /// Operation to apply to a `String` input.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StrOp {
     /// Convert the string to ASCII lowercase.
     Lowercase,

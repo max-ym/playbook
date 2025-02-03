@@ -28,6 +28,28 @@ pub struct Cycles<'canvas> {
     cycles: Vec<Vec<canvas::EdgeIdx>>,
 }
 
+impl Cycles<'_> {
+    /// Whether both cycles contain all the same edges in the same order.
+    /// Even if the initial node is different, the cycle is considered the same.
+    pub fn same(this: &[canvas::EdgeIdx], other: &[canvas::EdgeIdx]) -> bool {
+        if this.len() != other.len() {
+            return false;
+        }
+
+        // Iterate until we find the first edge that is the same.
+        if let Some(first) = other.iter().position(|&x| x == this[0]) {
+            let mut other_iter = other.iter().cycle().skip(first);
+            for &edge in this.iter() {
+                if edge != *other_iter.next().unwrap() {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+}
+
 pub struct Validator<'canvas, NodeMeta> {
     canvas: &'canvas Canvas<NodeMeta>,
 
@@ -53,11 +75,21 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             // We search as such:
             // Take any root node, and do a DFS search.
             // If we find a cycle, we mark it and continue with other unvisited nodes.
-            let mut stack = Stack::new();
+            let mut visitor = Visitor::new(&self.canvas);
             let mut cycles = SmallVec::<[_; 8]>::new();
 
             for root in self.canvas.root_nodes.iter().copied() {
-                stack.visit(self.canvas, root, &mut cycles);
+                visitor.visit(self.canvas, root, &mut cycles);
+            }
+
+            // Also account for nodes that have no root nodes because they are cyclic
+            // with no connection to any root node.
+            let mut last = 0;
+            while last != visitor.unvisited.len() {
+                if visitor.unvisited[last] {
+                    visitor.visit(self.canvas, last as canvas::NodeIdx, &mut cycles);
+                }
+                last += 1;
             }
 
             Cycles {
@@ -67,16 +99,20 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
         });
 
         #[derive(Debug, Clone)]
-        struct Stack {
+        struct Visitor {
             stack: SmallVec<[canvas::NodeIdx; 64]>,
+
+            /// Nodes that were not visited yet.
+            unvisited: Vec<bool>,
         }
 
         struct CycleDetectedError;
 
-        impl Stack {
-            fn new() -> Self {
+        impl Visitor {
+            fn new<T>(canvas: &Canvas<T>) -> Self {
                 Self {
                     stack: SmallVec::new(),
+                    unvisited: vec![true; canvas.nodes.len()],
                 }
             }
 
@@ -85,6 +121,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     Err(CycleDetectedError)
                 } else {
                     self.stack.push(node);
+                    self.unvisited[node as usize] = false;
                     Ok(())
                 }
             }
@@ -133,5 +170,114 @@ impl<T> Canvas<T> {
             .iter()
             .take_while(move |edge| edge.from.0 == node)
             .map(|edge| edge.to.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas::Pin;
+
+    // Test cycle detection.
+    #[test]
+    fn detect_cycle_dangling() {
+        let mut canvas = crate::canvas::Canvas::new();
+        let node = canvas::NodeStub::Todo {
+            msg: Default::default(),
+            inputs: 0,
+        };
+
+        let a = canvas.add_node(node.clone(), ());
+        let b = canvas.add_node(node.clone(), ());
+        let c = canvas.add_node(node.clone(), ());
+
+        canvas
+            .add_edge(Pin::only_node_id(a), Pin::only_node_id(b))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(b), Pin::only_node_id(c))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(c), Pin::only_node_id(a))
+            .unwrap();
+
+        let mut validator = Validator::new(&canvas);
+        let cycles = validator.detect_cycles();
+        assert_eq!(cycles.cycles.len(), 1);
+
+        let cycle = &cycles.cycles[0];
+        Cycles::same(cycle, &[0, 1, 2]);
+    }
+
+    #[test]
+    fn detect_cycle() {
+        let mut canvas = crate::canvas::Canvas::new();
+        let node = canvas::NodeStub::Todo {
+            msg: Default::default(),
+            inputs: 0,
+        };
+
+        let a = canvas.add_node(node.clone(), ());
+        let b = canvas.add_node(node.clone(), ());
+        let c = canvas.add_node(node.clone(), ());
+        let d = canvas.add_node(node.clone(), ());
+
+        canvas
+            .add_edge(Pin::only_node_id(a), Pin::only_node_id(b))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(b), Pin::only_node_id(c))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(c), Pin::only_node_id(d))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(d), Pin::only_node_id(b))
+            .unwrap();
+
+        let mut validator = Validator::new(&canvas);
+        let cycles = validator.detect_cycles();
+        assert_eq!(cycles.cycles.len(), 1);
+
+        let cycle = &cycles.cycles[0];
+        Cycles::same(cycle, &[1, 2, 3]);
+    }
+    
+    #[test]
+    fn detect_cycle_middle() {
+        let mut canvas = crate::canvas::Canvas::new();
+        let node = canvas::NodeStub::Todo {
+            msg: Default::default(),
+            inputs: 0,
+        };
+
+        let a = canvas.add_node(node.clone(), ());
+        let b = canvas.add_node(node.clone(), ());
+        let c = canvas.add_node(node.clone(), ());
+        let d = canvas.add_node(node.clone(), ());
+        let e = canvas.add_node(node.clone(), ());
+
+        canvas
+            .add_edge(Pin::only_node_id(a), Pin::only_node_id(b))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(b), Pin::only_node_id(c))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(c), Pin::only_node_id(d))
+            .unwrap();
+        canvas
+            .add_edge(Pin::only_node_id(d), Pin::only_node_id(b))
+            .unwrap();
+        canvas
+        .add_edge(Pin::only_node_id(c), Pin::only_node_id(e))
+        .unwrap();
+
+        let mut validator = Validator::new(&canvas);
+        let cycles = validator.detect_cycles();
+        assert_eq!(cycles.cycles.len(), 1);
+
+        let cycle = &cycles.cycles[0];
+        Cycles::same(cycle, &[1, 2, 3]);
     }
 }
