@@ -6,26 +6,34 @@ use smallvec::SmallVec;
 
 #[derive(Debug)]
 pub struct Canvas<NodeMeta> {
-    nodes: Vec<Node<NodeMeta>>,
-    edges: Vec<Edge>,
+    pub(crate) nodes: Vec<Node<NodeMeta>>,
+    pub(crate) edges: Vec<EdgeInner>,
     rnd: SmallRng,
 
-    /// IDs of the root nodes of the canvas.
-    /// From these nodes the execution of the flow starts.
-    /// Normally there should be only one, but we still allow to store here
-    /// multiple and then will show an error during validation.
-    ///
-    /// For projects that act as a library, the root nodes should be absent and instead
-    /// the project should have at least one input or output pin exposed.
-    root_nodes: SmallVec<[Id; 1]>,
+    /// Indexes of the root nodes of the canvas.
+    /// In a valid project, from these nodes the execution of the flow starts.
+    /// Some nodes cannot function as a starting point of execution, but they are still
+    /// considered root nodes, as they are not connected to any other node.
+    /// 
+    /// Note that this array stores all nodes that do not have a parent, even if they
+    /// cannot function as a starting point of execution in the valid project.
+    /// This array is later used by the validation to ensure that all nodes are reachable.
+    pub(crate) root_nodes: Vec<NodeIdx>,
 }
+
+/// The type used for [Id] representation. This transitively defines the maximum number of
+/// nodes and edges and thus the index type to use on their arrays.
+type IdInnerType = u32;
+
+pub(crate) type NodeIdx = IdInnerType;
+pub(crate) type EdgeIdx = IdInnerType;
 
 impl<NodeMeta> Canvas<NodeMeta> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
-            root_nodes: SmallVec::new(),
+            root_nodes: Vec::new(),
             rnd: {
                 use rand::SeedableRng;
                 std::time::SystemTime::now()
@@ -42,10 +50,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let id = Id::new_node_after(last, &mut self.rnd)
             .expect("node ID generation failed, maybe ID pool is used up");
 
-        if stub.is_root() {
-            self.root_nodes.push(id);
-        }
-
+        self.root_nodes.push(self.nodes.len() as NodeIdx);
         self.nodes.push(Node { id, stub, meta });
 
         id
@@ -65,13 +70,27 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let node = self.nodes.remove(idx);
 
         // Remove all edges that are connected to the removed node.
-        self.edges
-            .retain(|e| e.from.node_id != id && e.to.node_id != id);
+        let idx = idx as NodeIdx;
+        self.edges.retain(|e| e.from.0 != idx && e.to.0 != idx);
 
         // Remove the node from the root nodes.
-        self.root_nodes.retain(|root| *root != id);
+        let root_node_idx = self.root_nodes.iter().position(|&n| n == idx)?;
+        self.root_nodes.swap_remove(root_node_idx);
 
         Some(node)
+    }
+
+    pub fn edges(&self) -> impl Iterator<Item = Edge> + use<'_, NodeMeta> {
+        self.edges.iter().map(|e| Edge {
+            from: Pin {
+                node_id: self.nodes[e.from.0 as usize].id,
+                order: e.from.1,
+            },
+            to: Pin {
+                node_id: self.nodes[e.to.0 as usize].id,
+                order: e.to.1,
+            },
+        })
     }
 }
 
@@ -87,8 +106,8 @@ impl<Meta> Node<Meta> {
         self.stub.is_predicate()
     }
 
-    pub fn is_root(&self) -> bool {
-        self.stub.is_root()
+    pub fn is_start(&self) -> bool {
+        self.stub.is_start()
     }
 
     /// Count of input pins of the node, if statically known.
@@ -136,20 +155,37 @@ impl Pin {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct EdgeInner {
+    pub from: (NodeIdx, PinOrder),
+    pub to: (NodeIdx, PinOrder),
+}
+
+impl EdgeInner {
+    /// Binary search for the edge that starts from the given node.
+    /// Since edges are sorted by the starting node, we can use binary search.
+    /// Returned index is the first node that has the same starting node as the given one.
+    pub(crate) fn binary_search_from<T>(canvas: &Canvas<T>, node: NodeIdx) -> EdgeIdx {
+        let result = canvas.edges.binary_search(&EdgeInner::only_from_node(node));
+        (match result {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        }) as EdgeIdx
+    }
+
+    /// To be used for binary search, to indicate the first node that has the same starting node.
+    fn only_from_node(node: NodeIdx) -> Self {
+        Self {
+            from: (node, 0),
+            to: (0, 0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
     pub from: Pin,
     pub to: Pin,
-}
-
-impl Edge {
-    /// Construct edge for binary search of the node in sorted array.
-    pub(crate) const fn binary_search_from(node_id: Id) -> Self {
-        Self {
-            from: Pin::only_node_id(node_id),
-            to: Pin::zero(),
-        }
-    }
 }
 
 /// A unique identifier for a node or edge.
@@ -164,7 +200,7 @@ impl Edge {
 /// ID reuse, which could lead to subtle bugs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Id(u32);
+pub struct Id(IdInnerType);
 
 impl Id {
     pub const NODE_PREFIX: u32 = 0x4000_0000;
@@ -554,8 +590,8 @@ impl NodeStub {
         self.input_pin_count()
     }
 
-    /// Whether the node is a root node.
-    pub const fn is_root(&self) -> bool {
+    /// Whether the node can be used as a starting point of a flow.
+    pub const fn is_start(&self) -> bool {
         matches!(self, NodeStub::File)
     }
 
