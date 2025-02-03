@@ -242,7 +242,7 @@ mod tests {
         let cycle = &cycles.cycles[0];
         Cycles::same(cycle, &[1, 2, 3]);
     }
-    
+
     #[test]
     fn detect_cycle_middle() {
         let mut canvas = crate::canvas::Canvas::new();
@@ -270,8 +270,8 @@ mod tests {
             .add_edge(Pin::only_node_id(d), Pin::only_node_id(b))
             .unwrap();
         canvas
-        .add_edge(Pin::only_node_id(c), Pin::only_node_id(e))
-        .unwrap();
+            .add_edge(Pin::only_node_id(c), Pin::only_node_id(e))
+            .unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();
