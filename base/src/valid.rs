@@ -134,19 +134,34 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 &mut self,
                 canvas: &Canvas<T>,
                 node: canvas::NodeIdx,
-                cycles: &mut SmallVec<[Vec<canvas::EdgeIdx>; 8]>,
+                cycles: &mut SmallVec<[Vec<canvas::NodeIdx>; 8]>,
             ) {
                 // NOTE: reimplementation for performance reasons can be considered.
 
                 if self.insert(node).is_err() {
                     // We found a cycle.
-                    cycles.push(self.stack.to_vec());
+                    cycles.push(self.collect_cycle(node));
                 } else {
                     for adj in canvas.adjacent_child_nodes(node) {
                         self.visit(canvas, adj, cycles);
                     }
                 }
                 self.stack.pop();
+            }
+
+            // Collect a cycle from current stack, backtracing.
+            // Panics if the cycle head is not found in the stack.
+            fn collect_cycle(&self, head: canvas::NodeIdx) -> Vec<canvas::NodeIdx> {
+                let mut rewind_stack = SmallVec::<[_; 64]>::new();
+                let mut iter = self.stack.iter().copied().rev();
+                while let Some(next) = iter.next() {
+                    rewind_stack.push(next);
+                    if next == head {
+                        break;
+                    }
+                }
+                assert_eq!(rewind_stack.last(), Some(&head));
+                rewind_stack.into_vec()
             }
         }
     }
@@ -206,7 +221,8 @@ mod tests {
         assert_eq!(cycles.cycles.len(), 1);
 
         let cycle = &cycles.cycles[0];
-        Cycles::same(cycle, &[0, 1, 2]);
+        println!("{cycle:#?}");
+        assert!(Cycles::same(cycle, &[2, 1, 0]));
     }
 
     #[test]
@@ -240,7 +256,8 @@ mod tests {
         assert_eq!(cycles.cycles.len(), 1);
 
         let cycle = &cycles.cycles[0];
-        Cycles::same(cycle, &[1, 2, 3]);
+        println!("{cycle:#?}");
+        assert!(Cycles::same(cycle, &[3, 2, 1]));
     }
 
     #[test]
@@ -278,6 +295,7 @@ mod tests {
         assert_eq!(cycles.cycles.len(), 1);
 
         let cycle = &cycles.cycles[0];
-        Cycles::same(cycle, &[1, 2, 3]);
+        println!("{cycle:#?}");
+        assert!(Cycles::same(cycle, &[3, 2, 1]));
     }
 }
