@@ -82,8 +82,8 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 visitor.visit(self.canvas, root, &mut cycles);
             }
 
-            // Also account for nodes that have no root nodes because they are cyclic
-            // with no connection to any root node.
+            // Also account for nodes that have no root nodes because they are cyclic between
+            // each other with no head or tail.
             let mut last = 0;
             while last != visitor.unvisited.len() {
                 if visitor.unvisited[last] {
@@ -102,7 +102,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
         struct Visitor {
             stack: SmallVec<[canvas::NodeIdx; 64]>,
 
-            /// Nodes that were not visited yet.
+            /// Map of visited nodes.
             unvisited: Vec<bool>,
         }
 
