@@ -1,9 +1,10 @@
-use std::marker::PhantomData;
+use std::{collections::VecDeque, marker::PhantomData};
 
 use smallvec::SmallVec;
 
 use crate::canvas::{self, Canvas};
 
+#[derive(Debug, Clone)]
 struct AssignedType {
     /// Assigned type of the edge. Can be empty if not known, or
     /// can have many types if the edge is ambiguous.
@@ -47,6 +48,10 @@ impl Cycles<'_> {
         }
 
         true
+    }
+
+    pub fn is_some(&self) -> bool {
+        !self.cycles.is_empty()
     }
 }
 
@@ -166,12 +171,41 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
         }
     }
 
-    pub fn resolve_types(&mut self) -> &Typed<'canvas> {
-        if let Some(types) = &self.types {
-            return types;
+    /// Resolve types for the canvas nodes.
+    /// This will return None if there are cycles in the canvas.
+    pub fn resolve_types(&mut self) -> Option<&Typed<'canvas>> {
+        if self.detect_cycles().is_some() {
+            return None;
         }
 
-        todo!()
+        let value = self.types.get_or_insert_with(|| {
+            let mut edges = vec![
+                AssignedType {
+                    ty: SmallVec::new()
+                };
+                self.canvas.edges.len()
+            ];
+
+            // We start from the root nodes and propagate the types.
+
+            // Preallocate big enough queue for possible nodes.
+            let mut resolve_next = VecDeque::with_capacity(self.canvas.edges.len().min(512));
+            for root in self.canvas.root_nodes.iter().copied() {
+                let edges = self.canvas.adjacent_child_edges(root);
+                resolve_next.extend(edges);
+            }
+
+            while let Some(next) = resolve_next.pop_back() {
+                todo!()
+            }
+
+            Typed {
+                _canvas: PhantomData,
+                edges,
+            }
+        });
+
+        Some(value)
     }
 }
 
@@ -180,11 +214,17 @@ impl<T> Canvas<T> {
         &self,
         node: canvas::NodeIdx,
     ) -> impl Iterator<Item = canvas::NodeIdx> + '_ {
+        self.adjacent_child_edges(node)
+            .map(move |edge| self.edges[edge as usize].to.0)
+    }
+
+    fn adjacent_child_edges(&self, node: canvas::NodeIdx) -> impl Iterator<Item = canvas::EdgeIdx> + '_ {
         let start = canvas::EdgeInner::binary_search_from(self, node) as usize;
         self.edges[start..]
             .iter()
-            .take_while(move |edge| edge.from.0 == node)
-            .map(|edge| edge.to.0)
+            .enumerate()
+            .take_while(move |&(_, edge)| edge.from.0 == node)
+            .map(move |(index, _)| (start + index) as canvas::EdgeIdx)
     }
 }
 
