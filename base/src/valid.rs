@@ -9,6 +9,16 @@ struct AssignedType {
     /// Assigned type of the edge. Can be empty if not known, or
     /// can have many types if the edge is ambiguous.
     ty: SmallVec<[canvas::PrimitiveType; 1]>,
+
+    /// Mark the type as erroneous, e.g. when the statically known types of
+    /// input and output pins do not match.
+    is_err: bool,
+}
+
+impl AssignedType {
+    pub fn is_empty(&self) -> bool {
+        self.ty.is_empty()
+    }
 }
 
 /// Assigned types for the canvas nodes.
@@ -178,34 +188,117 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             return None;
         }
 
-        let value = self.types.get_or_insert_with(|| {
-            let mut edges = vec![
-                AssignedType {
-                    ty: SmallVec::new()
-                };
-                self.canvas.edges.len()
-            ];
+        return Some(self.types.get_or_insert_with(|| {
+            let mut r = Resolver::new(self.canvas);
+            r.resolve_all();
+            r.finish()
+        }));
 
-            // We start from the root nodes and propagate the types.
+        struct Resolver<'canvas, T> {
+            canvas: &'canvas Canvas<T>,
+            edges: Vec<AssignedType>,
+            resolve_next: VecDeque<canvas::NodeIdx>,
 
-            // Preallocate big enough queue for possible nodes.
-            let mut resolve_next = VecDeque::with_capacity(self.canvas.edges.len().min(512));
-            for root in self.canvas.root_nodes.iter().copied() {
-                let edges = self.canvas.adjacent_child_edges(root);
-                resolve_next.extend(edges);
+            // Buffer used to represent pin types of nodes, for
+            // node-level resolver from [canvas] module.
+            buf: Vec<Option<canvas::PrimitiveType>>,
+        }
+
+        impl<'canvas, T> Resolver<'canvas, T> {
+            pub fn new(canvas: &'canvas Canvas<T>) -> Self {
+                Self {
+                    canvas,
+                    edges: vec![
+                        AssignedType {
+                            ty: SmallVec::new(),
+                            is_err: false,
+                        };
+                        canvas.edges.len()
+                    ],
+
+                    // Preallocate big enough queue for possible edges.
+                    resolve_next: VecDeque::with_capacity(canvas.edges.len().min(512)),
+                    buf: Vec::with_capacity(64),
+                }
             }
 
-            while let Some(next) = resolve_next.pop_back() {
+            pub fn finish(self) -> Typed<'canvas> {
+                Typed {
+                    _canvas: PhantomData,
+                    edges: self.edges,
+                }
+            }
+
+            pub fn resolve_all(&mut self) {
+                // We start from the root nodes and then propagate the types.
+                self.resolve_next
+                    .extend(self.canvas.root_nodes.iter().copied());
+
+                while let Some(next) = self.resolve_next.pop_back() {
+                    self.resolve(next);
+                }
+            }
+
+            fn resolve(&mut self, node_idx: canvas::NodeIdx) {
+                use canvas::ResolvePinTypes;
+                use std::convert::Infallible as Never;
+
+                let stub = &self.canvas.nodes[node_idx as usize].stub;
+
+                loop {
+                    use canvas::PinResolutionError::*;
+
+                    self.load_buf_for(stub);
+                    let result = ResolvePinTypes::resolve(stub, &mut self.buf, true);
+                    let _: Never = match result {
+                        Ok(result) => {
+                            assert!(
+                                result.is_progres(),
+                                "Ok result here should mean progress was made"
+                            );
+                            self.save_buf_for(node_idx);
+                            continue;
+                        }
+                        Err(PinNumberMismatch) => {
+                            unreachable!("pin number mismatch, invalid preallocation?");
+                            // Pins should have been preallocated per node requirements, and
+                            // if we reach this point, it means that particular code
+                            // likely has a bug.
+                        }
+                        Err(UnionConflict) => {
+                            // Save any existing info for possible debug.
+                            self.save_buf_for(node_idx);
+                            self.mark_node_err(node_idx);
+
+                            // We would not be able to resolve this node, so we stop here.
+                            break;
+                        }
+                        Err(RemainingUnknownPins) => {
+                            // No progress was made, so we end with this node.
+                            break;
+                        }
+                    };
+                }
+            }
+
+            fn load_buf_for(&mut self, node: &canvas::NodeStub) {
+                self.buf.clear();
+                self.buf
+                    .resize_with(node.total_pin_count(), Default::default);
+
+                // Find all edges and load their currently-known types.
                 todo!()
             }
 
-            Typed {
-                _canvas: PhantomData,
-                edges,
+            fn save_buf_for(&mut self, node: canvas::NodeIdx) {
+                todo!()
             }
-        });
 
-        Some(value)
+            /// Mark this node as erroneous.
+            fn mark_node_err(&mut self, node: canvas::NodeIdx) {
+                todo!()
+            }
+        }
     }
 }
 
@@ -218,7 +311,10 @@ impl<T> Canvas<T> {
             .map(move |edge| self.edges[edge as usize].to.0)
     }
 
-    fn adjacent_child_edges(&self, node: canvas::NodeIdx) -> impl Iterator<Item = canvas::EdgeIdx> + '_ {
+    fn adjacent_child_edges(
+        &self,
+        node: canvas::NodeIdx,
+    ) -> impl Iterator<Item = canvas::EdgeIdx> + '_ {
         let start = canvas::EdgeInner::binary_search_from(self, node) as usize;
         self.edges[start..]
             .iter()
@@ -233,6 +329,17 @@ mod tests {
     use super::*;
     use canvas::Pin;
 
+    macro_rules! outpin {
+        ($node:expr) => {
+            canvas::OutputPin(Pin::only_node_id($node))
+        };
+    }
+    macro_rules! inpin {
+        ($node:expr) => {
+            canvas::InputPin(Pin::only_node_id($node))
+        };
+    }
+
     // Test cycle detection.
     #[test]
     fn detect_cycle_dangling() {
@@ -246,15 +353,9 @@ mod tests {
         let b = canvas.add_node(node.clone(), ());
         let c = canvas.add_node(node.clone(), ());
 
-        canvas
-            .add_edge(Pin::only_node_id(a), Pin::only_node_id(b))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(b), Pin::only_node_id(c))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(c), Pin::only_node_id(a))
-            .unwrap();
+        canvas.add_edge(outpin!(a), inpin!(b)).unwrap();
+        canvas.add_edge(outpin!(b), inpin!(c)).unwrap();
+        canvas.add_edge(outpin!(c), inpin!(a)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();
@@ -278,18 +379,10 @@ mod tests {
         let c = canvas.add_node(node.clone(), ());
         let d = canvas.add_node(node.clone(), ());
 
-        canvas
-            .add_edge(Pin::only_node_id(a), Pin::only_node_id(b))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(b), Pin::only_node_id(c))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(c), Pin::only_node_id(d))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(d), Pin::only_node_id(b))
-            .unwrap();
+        canvas.add_edge(outpin!(a), inpin!(b)).unwrap();
+        canvas.add_edge(outpin!(b), inpin!(c)).unwrap();
+        canvas.add_edge(outpin!(c), inpin!(d)).unwrap();
+        canvas.add_edge(outpin!(d), inpin!(b)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();
@@ -314,21 +407,11 @@ mod tests {
         let d = canvas.add_node(node.clone(), ());
         let e = canvas.add_node(node.clone(), ());
 
-        canvas
-            .add_edge(Pin::only_node_id(a), Pin::only_node_id(b))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(b), Pin::only_node_id(c))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(c), Pin::only_node_id(d))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(d), Pin::only_node_id(b))
-            .unwrap();
-        canvas
-            .add_edge(Pin::only_node_id(c), Pin::only_node_id(e))
-            .unwrap();
+        canvas.add_edge(outpin!(a), inpin!(b)).unwrap();
+        canvas.add_edge(outpin!(b), inpin!(c)).unwrap();
+        canvas.add_edge(outpin!(c), inpin!(d)).unwrap();
+        canvas.add_edge(outpin!(d), inpin!(b)).unwrap();
+        canvas.add_edge(outpin!(c), inpin!(e)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();

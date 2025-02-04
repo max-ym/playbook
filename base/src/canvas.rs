@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use bigdecimal::BigDecimal;
 use compact_str::CompactString;
 use lazy_regex::Regex;
@@ -84,28 +86,36 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
     pub fn edges(&self) -> impl Iterator<Item = Edge> + use<'_, NodeMeta> {
         self.edges.iter().map(|e| Edge {
-            from: Pin {
+            from: OutputPin(Pin {
                 node_id: self.nodes[e.from.0 as usize].id,
                 order: e.from.1,
-            },
-            to: Pin {
+            }),
+            to: InputPin(Pin {
                 node_id: self.nodes[e.to.0 as usize].id,
                 order: e.to.1,
-            },
+            }),
         })
     }
 
     /// Add the edge to the canvas. This will return the index of the edge in the canvas.
     /// If the edge already exists, the existing index is returned.
     /// If the nodes referenced by the edge do not exist, this function will return an error.
-    /// 
+    ///
     /// This does not validate pin numbers. The validation for that is performed later on
     /// validation/resolution step.
     // NOTE: insertion performance is low for old nodes due to inserts onto the array beginning.
     // Consider optimizing this if it becomes a bottleneck.
-    pub fn add_edge(&mut self, from: Pin, to: Pin) -> Result<EdgeIdx, NodeNotFoundError> {
-        let from_idx = self.node_id_to_idx(from.node_id).ok_or(NodeNotFoundError(from.node_id))?;
-        let to_idx = self.node_id_to_idx(to.node_id).ok_or(NodeNotFoundError(to.node_id))?;
+    pub fn add_edge(
+        &mut self,
+        from: OutputPin,
+        to: InputPin,
+    ) -> Result<EdgeIdx, NodeNotFoundError> {
+        let from_idx = self
+            .node_id_to_idx(from.node_id)
+            .ok_or(NodeNotFoundError(from.node_id))?;
+        let to_idx = self
+            .node_id_to_idx(to.node_id)
+            .ok_or(NodeNotFoundError(to.node_id))?;
 
         let edge = EdgeInner {
             from: (from_idx, from.order),
@@ -197,6 +207,30 @@ impl Pin {
     }
 }
 
+/// The [Pin] that is used as an ontput from the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OutputPin(pub(crate) Pin);
+
+/// The [Pin] that is used as an input to the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InputPin(pub(crate) Pin);
+
+impl Deref for OutputPin {
+    type Target = Pin;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for InputPin {
+    type Target = Pin;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct EdgeInner {
     pub from: (NodeIdx, PinOrder),
@@ -226,8 +260,8 @@ impl EdgeInner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
-    pub from: Pin,
-    pub to: Pin,
+    pub from: OutputPin,
+    pub to: InputPin,
 }
 
 /// A unique identifier for a node or edge.
@@ -655,69 +689,105 @@ pub enum IoRelation {
 }
 
 /// Result of resolution of pin types of some node.
-pub struct ResolvePinTypes {
-    pins: Vec<Option<PrimitiveType>>,
+pub struct ResolvePinTypes<'a> {
+    pins: &'a mut Vec<Option<PrimitiveType>>,
+    is_progress: bool,
 }
 
-impl ResolvePinTypes {
+impl<'pins> ResolvePinTypes<'pins> {
+    pub(crate) fn pin_io_slices_mut<'a>(
+        pins: &'a mut [Option<PrimitiveType>],
+        node: &NodeStub,
+    ) -> (
+        &'a mut [Option<PrimitiveType>],
+        &'a mut [Option<PrimitiveType>],
+    ) {
+        let (inputs, outputs) = pins.split_at_mut(node.input_pin_count());
+        (inputs, outputs)
+    }
+
+    /// Whether the last iteration has changed any pin type.
+    pub fn is_progres(&self) -> bool {
+        self.is_progress
+    }
+
     /// Resolve the pin types of the given node.
     /// The `set` parameter is a vector holding the resolved types of the input and output pins.
     /// Resolver cannot change those but it can use them to determine the types of other pins.
     /// Vector should be the same length as the number of pins of the node.
+    /// 
+    /// `expect_progress_or_complete` should be set to true if the context expects to have
+    /// any progress in the resolution. If no progress is made, the function will return an error.
+    /// The error is silenced for already fully resolved nodes.
     pub fn resolve(
         node: &NodeStub,
-        mut pins: Vec<Option<PrimitiveType>>,
+        pins: &'pins mut Vec<Option<PrimitiveType>>,
+        expect_progress_or_complete: bool,
     ) -> Result<Self, PinResolutionError> {
         if pins.len() != node.total_pin_count() {
             return Err(PinResolutionError::PinNumberMismatch);
         }
 
-        ResolvePinTypes::prefill_with_static(node, &mut pins)?;
+        ResolvePinTypes::prefill_with_static(node, pins)?;
 
         let result = match node.static_io_relation() {
             IoRelation::Same(pairs) => {
+                let mut is_progress = false;
                 for &(i, o) in pairs {
                     let (i, o) = (i as usize, o as usize);
-                    let any = ResolvePinTypes::any(&pins[i], &pins[o]);
-                    pins[i] = any.clone();
-                    pins[o] = any;
+                    let (i, o) = {
+                        // To satisfy the borrow checker, we split slice to guarantee
+                        // non-overlapping mutable references.
+                        let (a, b) = pins.split_at_mut(i + 1);
+                        (&mut a[i], &mut b[o - i - 1])
+                    };
+                    let any = ResolvePinTypes::any(i, o);
+                    is_progress |= ResolvePinTypes::set_to(any, i, o);
                 }
 
-                Self { pins }
+                Self { pins, is_progress }
             }
             IoRelation::FullSymmetry => {
-                let output_idx = node.output_pin_start_idx();
+                let mut is_progress = false;
 
-                let (ins, outs) = pins.split_at_mut(output_idx);
+                let (ins, outs) = Self::pin_io_slices_mut(pins, node);
                 for (i, o) in ins.iter_mut().zip(outs.iter_mut()) {
-                    ResolvePinTypes::unite(i, o)?;
+                    is_progress |= ResolvePinTypes::unite(i, o)?;
                 }
 
-                Self { pins }
+                Self { pins, is_progress }
             }
             IoRelation::Unspecified => {
                 use NodeStub::*;
                 match node {
                     Regex { .. } => {
+                        let mut is_progress = false;
+
                         // All should be strings.
                         for pin in pins.iter_mut() {
-                            ResolvePinTypes::match_types_write(PrimitiveType::Str, pin)?;
+                            is_progress |=
+                                ResolvePinTypes::match_types_write(PrimitiveType::Str, pin)?;
                         }
-                        Self { pins }
+
+                        Self { pins, is_progress }
                     }
                     Map { tuples, .. } => {
+                        let mut is_progress = false;
+
                         let first = &tuples
                             .first()
                             .expect("Map should have at least one tuple")
                             .1;
                         for (i, val) in first.iter().enumerate() {
-                            ResolvePinTypes::match_types_write(val.type_of(), &mut pins[i])?;
+                            is_progress |=
+                                ResolvePinTypes::match_types_write(val.type_of(), &mut pins[i])?;
                         }
 
                         // Input types should be already provided externally.
-                        Self { pins }
+                        Self { pins, is_progress }
                     }
                     IfElse { condition, inputs } => {
+                        let mut is_progress = false;
                         // Output pins have groups for true and false branch.
                         // Otherwise, each of that group is symmetric to input pins, except for
                         // the first ones that go to the condition predicate.
@@ -727,9 +797,9 @@ impl ResolvePinTypes {
                         let (predicate_pins, rest) = pins.split_at_mut(after_predicate_idx);
                         let (input_pins, rest) = rest.split_at_mut(branch_size);
                         let (true_branch, false_branch) = rest.split_at_mut(branch_size);
-                        debug_assert_eq!(input_pins.len(), branch_size);
-                        debug_assert_eq!(true_branch.len(), branch_size);
-                        debug_assert_eq!(false_branch.len(), branch_size);
+                        assert_eq!(input_pins.len(), branch_size);
+                        assert_eq!(true_branch.len(), branch_size);
+                        assert_eq!(false_branch.len(), branch_size);
 
                         // Resolve input data pins (exclude predicate).
                         for (i, (t, f)) in true_branch
@@ -738,35 +808,43 @@ impl ResolvePinTypes {
                             .enumerate()
                         {
                             if let Some(ty) = input_pins[i].as_ref() {
-                                ResolvePinTypes::match_types_write(ty.clone(), t)?;
-                                ResolvePinTypes::match_types_write(ty.clone(), f)?;
+                                is_progress |= ResolvePinTypes::match_types_write(ty.clone(), t)?;
+                                is_progress |= ResolvePinTypes::match_types_write(ty.clone(), f)?;
                             }
                         }
 
                         // Resolve predicate pins.
                         for (i, ty) in condition.inputs.iter().enumerate() {
-                            ResolvePinTypes::match_types_write(
+                            is_progress |= ResolvePinTypes::match_types_write(
                                 ty.to_owned(),
                                 &mut predicate_pins[i],
                             )?;
                         }
 
-                        Self { pins }
+                        Self { pins, is_progress }
                     }
                     Match { .. } => todo!(),
                     Func { .. } => todo!(),
                     Constant(value) => {
                         let ty = value.type_of();
-                        debug_assert_eq!(pins.len(), 1);
-                        ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
+                        assert_eq!(pins.len(), 1);
+                        let is_progress = ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
 
-                        Self { pins }
+                        Self { pins, is_progress }
                     }
-                    _ => Self { pins },
+                    _ => Self {
+                        pins,
+                        is_progress: false,
+                    },
                 }
             }
         };
-        result.ensure_resolved()
+
+        if expect_progress_or_complete && !result.is_progress {
+            result.ensure_resolved()
+        } else {
+            Ok(result)
+        }
     }
 
     /// Prefill missing types per static information.
@@ -811,7 +889,8 @@ impl ResolvePinTypes {
     /// If either of the pins is `None`, they are unified to the same type.
     /// If both are `Some`, they are validated to be the same type.
     /// If both are None, they are left as None and false is returned.
-    /// True is returned if the types were unified.
+    /// True is returned if the types were unified by making a change.
+    /// False is returned if no change was made.
     fn unite(
         a: &mut Option<PrimitiveType>,
         b: &mut Option<PrimitiveType>,
@@ -819,9 +898,10 @@ impl ResolvePinTypes {
         if let Some(a) = a {
             if let Some(b) = b {
                 if a != b {
-                    return Err(UnionConflict);
+                    Err(UnionConflict)
+                } else {
+                    Ok(false)
                 }
-                Ok(false)
             } else {
                 *b = Some(a.clone());
                 Ok(true)
@@ -834,7 +914,27 @@ impl ResolvePinTypes {
         }
     }
 
+    /// Set all pins to the given value. Return true if any change was made.
+    fn set_to(
+        val: Option<PrimitiveType>,
+        a: &mut Option<PrimitiveType>,
+        b: &mut Option<PrimitiveType>,
+    ) -> bool {
+        let mut changed = false;
+        if a != &val {
+            *a = val.clone();
+            changed = true;
+        }
+        if b != &val {
+            *b = val;
+            changed = true;
+        }
+        changed
+    }
+
     /// If `b` is `Some`, it should be equal to `a`.
+    /// Otherwise, `b` is set to `a`.
+    /// True is returned if change was made.
     fn match_types_write(
         a: PrimitiveType,
         b: &mut Option<PrimitiveType>,
