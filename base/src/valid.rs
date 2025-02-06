@@ -65,8 +65,43 @@ impl Cycles<'_> {
     }
 }
 
+/// Collected input and output edges for single node, to speed up lookup
+/// for the resolver.
+#[derive(Debug, Clone, Default)]
+struct NodeEdges {
+    /// Array containing all input and output edge indices.
+    /// First go input edges, then output edges.
+    /// Each input edge is sorted by source node index,
+    /// and each output edge is sorted by destination node index.
+    /// Sorted slices allow for binary search.
+    arr: SmallVec<[canvas::EdgeIdx; 16]>,
+
+    /// Index where the output edges start.
+    split_at: canvas::EdgeIdx,
+}
+
+impl NodeEdges {
+    fn inputs(&self) -> &[canvas::EdgeIdx] {
+        &self.arr[..self.split_at as usize]
+    }
+
+    fn inputs_mut(&mut self) -> &mut [canvas::EdgeIdx] {
+        &mut self.arr[..self.split_at as usize]
+    }
+
+    fn outputs(&self) -> &[canvas::EdgeIdx] {
+        &self.arr[self.split_at as usize..]
+    }
+
+    fn outputs_mut(&mut self) -> &mut [canvas::EdgeIdx] {
+        &mut self.arr[self.split_at as usize..]
+    }
+}
+
 pub struct Validator<'canvas, NodeMeta> {
     canvas: &'canvas Canvas<NodeMeta>,
+
+    node_edges: Vec<NodeEdges>,
 
     /// Result of cycle detection if it was performed.
     cycles: Option<Cycles<'canvas>>,
@@ -79,39 +114,149 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
     pub fn new(canvas: &'canvas Canvas<NodeMeta>) -> Self {
         Self {
             canvas,
+            node_edges: Vec::new(),
             cycles: None,
             types: None,
         }
     }
 
+    /// Fill in the lookup table for node edges.
+    /// This is used to speed up the resolver.
+    ///
+    /// This does nothing if the table is already filled.
+    pub fn collect_node_edges_table(&mut self) {
+        if self.node_edges.len() > 0 {
+            assert_eq!(
+                self.node_edges.len(),
+                self.canvas.nodes.len(),
+                "node edges table should be filled for all nodes",
+            );
+            return;
+        }
+
+        self.node_edges = vec![NodeEdges::default(); self.canvas.nodes.len()];
+        for (edge_idx, edge) in self.canvas.edges.iter().enumerate() {
+            let from = edge.from.0 as usize;
+            let to = edge.to.0 as usize;
+
+            self.node_edges[from].arr.push(edge_idx as canvas::EdgeIdx);
+            self.node_edges[to].arr.push(edge_idx as canvas::EdgeIdx);
+        }
+
+        // Sort the edges for each node.
+        // We need each output and input sub-arrays to be sorted by the
+        // destination or source node index, respectively.
+        for (idx, node_edges) in self.node_edges.iter_mut().enumerate() {
+            node_edges.arr.sort_by_key(|&edge| {
+                let edge = &self.canvas.edges[edge as usize];
+                if edge.from.0 == idx as canvas::NodeIdx {
+                    edge.to.0
+                } else {
+                    edge.from.0
+                }
+            });
+
+            // Find the split point for input/output edges.
+            node_edges.split_at = node_edges
+                .arr
+                .iter()
+                .position(|&edge| {
+                    let edge = &self.canvas.edges[edge as usize];
+                    edge.from.0 != idx as canvas::NodeIdx
+                })
+                .map(|v| v as canvas::EdgeIdx)
+                .unwrap_or_else(|| node_edges.arr.len() as canvas::EdgeIdx);
+
+            // Sort the input edges by source node index.
+            node_edges.inputs_mut().sort_by_key(|&edge| {
+                let edge = &self.canvas.edges[edge as usize];
+                edge.from.0
+            });
+
+            // Sort the output edges by destination node index.
+            node_edges.outputs_mut().sort_by_key(|&edge| {
+                let edge = &self.canvas.edges[edge as usize];
+                edge.to.0
+            });
+        }
+    }
+
+    fn is_node_edges_ready(&self) -> bool {
+        self.node_edges.len() == self.canvas.nodes.len()
+    }
+
+    fn adjacent_child_nodes(
+        &self,
+        node: canvas::NodeIdx,
+    ) -> impl Iterator<Item = canvas::NodeIdx> + '_ {
+        assert!(self.is_node_edges_ready());
+        return Iter {
+            prev: None,
+            iter: self.node_edges[node as usize].outputs().iter().copied(),
+            validator: self,
+        };
+        
+        // This iterator to help us deduplicate the output.
+        // Since the edges are sorted by destination node index,
+        // we can skip duplicates by just comparing subsequent edge indices.
+        struct Iter<'canvas, NodeMeta, I: Iterator<Item = canvas::EdgeIdx>> {
+            prev: Option<canvas::NodeIdx>,
+            iter: I,
+            validator: &'canvas Validator<'canvas, NodeMeta>,
+        }
+
+        impl<T, I: Iterator<Item = canvas::EdgeIdx>> Iterator for Iter<'_, T, I> {
+            type Item = canvas::NodeIdx;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                while let Some(edge) = self.iter.next() {
+                    let edge = self.validator.canvas.edges[edge as usize];
+                    let node = edge.to.0;
+                    if Some(node) != self.prev {
+                        self.prev = Some(node);
+                        return Some(node);
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Detect cycles in the canvas.
     pub fn detect_cycles(&mut self) -> &Cycles<'canvas> {
-        return self.cycles.get_or_insert_with(|| {
-            // We search as such:
-            // Take any root node, and do a DFS search.
-            // If we find a cycle, we mark it and continue with other unvisited nodes.
-            let mut visitor = Visitor::new(&self.canvas);
-            let mut cycles = SmallVec::<[_; 8]>::new();
+        return {
+            if self.cycles.is_none() {
+                self.collect_node_edges_table();
 
-            for root in self.canvas.root_nodes.iter().copied() {
-                visitor.visit(self.canvas, root, &mut cycles);
-            }
+                // We search as such:
+                // Take any root node, and do a DFS search.
+                // If we find a cycle, we mark it and continue with other unvisited nodes.
+                let mut visitor = Visitor::new(&self.canvas);
+                let mut cycles = SmallVec::<[_; 8]>::new();
 
-            // Also account for nodes that have no root nodes because they are cyclic between
-            // each other with no head or tail.
-            let mut last = 0;
-            while last != visitor.unvisited.len() {
-                if visitor.unvisited[last] {
-                    visitor.visit(self.canvas, last as canvas::NodeIdx, &mut cycles);
+                for root in self.canvas.root_nodes.iter().copied() {
+                    visitor.visit(self, root, &mut cycles);
                 }
-                last += 1;
-            }
 
-            Cycles {
-                _canvas: PhantomData,
-                cycles: cycles.into_vec(),
+                // Also account for nodes that have no root nodes because they are cyclic between
+                // each other with no head or tail.
+                let mut last = 0;
+                while last != visitor.unvisited.len() {
+                    if visitor.unvisited[last] {
+                        visitor.visit(self, last as canvas::NodeIdx, &mut cycles);
+                    }
+                    last += 1;
+                }
+
+                self.cycles = Some(Cycles {
+                    _canvas: PhantomData,
+                    cycles: cycles.into_vec(),
+                });
             }
-        });
+            self.cycles
+                .as_ref()
+                .expect("either initialized just above, or already was initialized on call")
+        };
 
         #[derive(Debug, Clone)]
         struct Visitor {
@@ -147,7 +292,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
             fn visit<T>(
                 &mut self,
-                canvas: &Canvas<T>,
+                validator: &Validator<T>,
                 node: canvas::NodeIdx,
                 cycles: &mut SmallVec<[Vec<canvas::NodeIdx>; 8]>,
             ) {
@@ -157,8 +302,8 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     // We found a cycle.
                     cycles.push(self.collect_cycle(node));
                 } else {
-                    for adj in canvas.adjacent_child_nodes(node) {
-                        self.visit(canvas, adj, cycles);
+                    for adj in validator.adjacent_child_nodes(node) {
+                        self.visit(validator, adj, cycles);
                     }
                 }
                 self.stack.pop();
@@ -194,8 +339,8 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             r.finish()
         }));
 
-        struct Resolver<'canvas, T> {
-            canvas: &'canvas Canvas<T>,
+        struct Resolver<'validator, 'canvas, T> {
+            validator: &'validator Validator<'canvas, T>,
             edges: Vec<AssignedType>,
             resolve_next: VecDeque<canvas::NodeIdx>,
 
@@ -204,20 +349,20 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             buf: Vec<Option<canvas::PrimitiveType>>,
         }
 
-        impl<'canvas, T> Resolver<'canvas, T> {
-            pub fn new(canvas: &'canvas Canvas<T>) -> Self {
+        impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
+            pub fn new(validator: &'validator Validator<'canvas, T>) -> Self {
                 Self {
-                    canvas,
+                    validator,
                     edges: vec![
                         AssignedType {
                             ty: SmallVec::new(),
                             is_err: false,
                         };
-                        canvas.edges.len()
+                        validator.canvas.edges.len()
                     ],
 
-                    // Preallocate big enough queue for possible edges.
-                    resolve_next: VecDeque::with_capacity(canvas.edges.len().min(512)),
+                    // Preallocate big enough queue for possible nodes.
+                    resolve_next: VecDeque::with_capacity(validator.canvas.nodes.len().min(512)),
                     buf: Vec::with_capacity(64),
                 }
             }
@@ -229,10 +374,14 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 }
             }
 
+            fn canvas(&self) -> &'canvas Canvas<T> {
+                self.validator.canvas
+            }
+
             pub fn resolve_all(&mut self) {
                 // We start from the root nodes and then propagate the types.
                 self.resolve_next
-                    .extend(self.canvas.root_nodes.iter().copied());
+                    .extend(self.canvas().root_nodes.iter().copied());
 
                 while let Some(next) = self.resolve_next.pop_back() {
                     self.resolve(next);
@@ -243,12 +392,12 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 use canvas::ResolvePinTypes;
                 use std::convert::Infallible as Never;
 
-                let stub = &self.canvas.nodes[node_idx as usize].stub;
+                let stub = &self.canvas().nodes[node_idx as usize].stub;
 
                 loop {
                     use canvas::PinResolutionError::*;
 
-                    self.load_buf_for(stub);
+                    self.load_buf_for(node_idx);
                     let result = ResolvePinTypes::resolve(stub, &mut self.buf, true);
                     let _: Never = match result {
                         Ok(result) => {
@@ -281,46 +430,63 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 }
             }
 
-            fn load_buf_for(&mut self, node: &canvas::NodeStub) {
+            fn load_buf_for(&mut self, node_idx: canvas::NodeIdx) {
+                let stub = &self.canvas().nodes[node_idx as usize].stub;
+
                 self.buf.clear();
                 self.buf
-                    .resize_with(node.total_pin_count(), Default::default);
+                    .resize_with(stub.total_pin_count(), Default::default);
 
                 // Find all edges and load their currently-known types.
-                todo!()
+                let node_edges = &self.validator.node_edges[node_idx as usize];
+                for edge_idx in node_edges.arr.iter().copied() {
+                    let edge = &self.canvas().edges[edge_idx as usize];
+                    let ty = &self.edges[edge_idx as usize];
+
+                    let pin_idx = if edge.from.0 == node_idx {
+                        edge.from.1
+                    } else {
+                        edge.to.1
+                    };
+
+                    self.buf[pin_idx as usize] = if ty.is_err {
+                        None
+                    } else {
+                        Some(ty.ty[0].clone())
+                    };
+                }
             }
 
             fn save_buf_for(&mut self, node: canvas::NodeIdx) {
-                todo!()
+                let node_edges = &self.validator.node_edges[node as usize];
+                for edge_idx in node_edges.arr.iter().copied() {
+                    let edge = &self.canvas().edges[edge_idx as usize];
+                    let assigned_ty = &mut self.edges[edge_idx as usize];
+
+                    let pin_idx = if edge.from.0 == node {
+                        edge.from.1
+                    } else {
+                        edge.to.1
+                    };
+
+                    if let Some(ty) = &self.buf[pin_idx as usize] {
+                        assigned_ty.ty.clear();
+                        assigned_ty.ty.push(ty.clone());
+                    } else {
+                        assigned_ty.ty.clear();
+                    }
+                }
             }
 
             /// Mark this node as erroneous.
             fn mark_node_err(&mut self, node: canvas::NodeIdx) {
-                todo!()
+                let node_edges = &self.validator.node_edges[node as usize];
+                for edge_idx in node_edges.arr.iter().copied() {
+                    let assigned_ty = &mut self.edges[edge_idx as usize];
+                    assigned_ty.is_err = true;
+                }
             }
         }
-    }
-}
-
-impl<T> Canvas<T> {
-    fn adjacent_child_nodes(
-        &self,
-        node: canvas::NodeIdx,
-    ) -> impl Iterator<Item = canvas::NodeIdx> + '_ {
-        self.adjacent_child_edges(node)
-            .map(move |edge| self.edges[edge as usize].to.0)
-    }
-
-    fn adjacent_child_edges(
-        &self,
-        node: canvas::NodeIdx,
-    ) -> impl Iterator<Item = canvas::EdgeIdx> + '_ {
-        let start = canvas::EdgeInner::binary_search_from(self, node) as usize;
-        self.edges[start..]
-            .iter()
-            .enumerate()
-            .take_while(move |&(_, edge)| edge.from.0 == node)
-            .map(move |(index, _)| (start + index) as canvas::EdgeIdx)
     }
 }
 
