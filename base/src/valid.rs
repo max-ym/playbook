@@ -574,6 +574,11 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
                 while let Some(next) = self.resolve_next.pop_back() {
                     self.resolve(next);
+                    
+                    // Add children to the resolve queue.
+                    for child in self.validator.adjacent_child_nodes(next) {
+                        self.resolve_next.push_front(child);
+                    }
                 }
             }
 
