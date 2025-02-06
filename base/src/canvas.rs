@@ -1063,7 +1063,7 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PrimitiveType {
     Int,
     Uint,
@@ -1137,7 +1137,7 @@ impl From<PrimitiveTypeConst> for PrimitiveType {
 ///
 /// External projects are qualified if they have at least one pin for the node
 /// they will be represented with. They themselves, as functions, should be pure and deterministic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Predicate {
     pub inputs: SmallVec<[PrimitiveType; 1]>,
     pub outputs: SmallVec<[PrimitiveType; 1]>,

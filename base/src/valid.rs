@@ -460,7 +460,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                         ty: None,
                         is_err: false,
                     };
-                    self.node_to_pins.len() - self.canvas().edges.len()
+                    self.node_to_pins.len()
                 ];
 
                 trace!("init pins for all nodes, which appear in an edge");
@@ -501,6 +501,11 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     }
                 }
 
+                // Shrink as some pins are not used, like in case when one
+                // pin participates in an edge, or even in several edges,
+                // reducing total number of "merged" pins in array.
+                self.pins.shrink_to(cnt);
+
                 debug_assert!(self
                     .node_to_pins
                     .iter()
@@ -531,7 +536,29 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             }
 
             pub fn finish(self) -> Typed<'canvas> {
-                todo!()
+                let mut types: Vec<_> = self
+                    .pins
+                    .iter()
+                    .filter_map(|pin| pin.ty.to_owned())
+                    .collect();
+                types.sort_unstable();
+                types.dedup();
+
+                let mut nodes = vec![Vec::new(); self.validator.canvas.nodes.len()];
+                for pin in self.node_to_pins {
+                    if let Some(ty) = self.pins[pin.map_idx].ty.to_owned() {
+                        let idx = types.binary_search(&ty).unwrap();
+                        nodes[pin.node_idx as usize].push(idx);
+                    } else {
+                        nodes[pin.node_idx as usize].push(usize::MAX);
+                    }
+                }
+
+                Typed {
+                    _canvas: PhantomData,
+                    tys: types,
+                    nodes,
+                }
             }
 
             fn canvas(&self) -> &'canvas Canvas<T> {
@@ -644,7 +671,10 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 }
 
                 std::mem::swap(&mut self.buf, &mut buf);
-                trace!("loaded types resolver buffer for node {node_idx} as {:?}", self.buf);
+                trace!(
+                    "loaded types resolver buffer for node {node_idx} as {:?}",
+                    self.buf
+                );
             }
 
             fn save_buf_for(&mut self, node: canvas::NodeIdx) {
