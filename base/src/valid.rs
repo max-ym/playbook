@@ -195,7 +195,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             iter: self.node_edges[node as usize].outputs().iter().copied(),
             validator: self,
         };
-        
+
         // This iterator to help us deduplicate the output.
         // Since the edges are sorted by destination node index,
         // we can skip duplicates by just comparing subsequent edge indices.
@@ -329,15 +329,18 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
     /// Resolve types for the canvas nodes.
     /// This will return None if there are cycles in the canvas.
     pub fn resolve_types(&mut self) -> Option<&Typed<'canvas>> {
-        if self.detect_cycles().is_some() {
-            return None;
-        }
+        return {
+            if self.types.is_none() {
+                if self.detect_cycles().is_some() {
+                    return None;
+                }
 
-        return Some(self.types.get_or_insert_with(|| {
-            let mut r = Resolver::new(self.canvas);
-            r.resolve_all();
-            r.finish()
-        }));
+                let mut r = Resolver::new(self);
+                r.resolve_all();
+                self.types = Some(r.finish());
+            }
+            self.types.as_ref()
+        };
 
         struct Resolver<'validator, 'canvas, T> {
             validator: &'validator Validator<'canvas, T>,
