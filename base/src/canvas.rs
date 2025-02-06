@@ -3,6 +3,7 @@ use std::ops::Deref;
 use bigdecimal::BigDecimal;
 use compact_str::CompactString;
 use lazy_regex::Regex;
+use log::trace;
 use rand::rngs::SmallRng;
 use smallvec::SmallVec;
 
@@ -720,7 +721,7 @@ impl<'pins> ResolvePinTypes<'pins> {
     }
 
     /// Whether the last iteration has changed any pin type.
-    pub fn is_progres(&self) -> bool {
+    pub fn is_progress(&self) -> bool {
         self.is_progress
     }
 
@@ -741,11 +742,10 @@ impl<'pins> ResolvePinTypes<'pins> {
             return Err(PinResolutionError::PinNumberMismatch);
         }
 
-        ResolvePinTypes::prefill_with_static(node, pins)?;
+        let mut is_progress = ResolvePinTypes::prefill_with_static(node, pins)?;
 
         let result = match node.static_io_relation() {
             IoRelation::Same(pairs) => {
-                let mut is_progress = false;
                 for &(i, o) in pairs {
                     let (i, o) = (i as usize, o as usize);
                     let (i, o) = {
@@ -761,8 +761,6 @@ impl<'pins> ResolvePinTypes<'pins> {
                 Self { pins, is_progress }
             }
             IoRelation::FullSymmetry => {
-                let mut is_progress = false;
-
                 let (ins, outs) = Self::pin_io_slices_mut(pins, node);
                 for (i, o) in ins.iter_mut().zip(outs.iter_mut()) {
                     is_progress |= ResolvePinTypes::unite(i, o)?;
@@ -774,8 +772,6 @@ impl<'pins> ResolvePinTypes<'pins> {
                 use NodeStub::*;
                 match node {
                     Regex { .. } => {
-                        let mut is_progress = false;
-
                         // All should be strings.
                         for pin in pins.iter_mut() {
                             is_progress |=
@@ -785,8 +781,6 @@ impl<'pins> ResolvePinTypes<'pins> {
                         Self { pins, is_progress }
                     }
                     Map { tuples, .. } => {
-                        let mut is_progress = false;
-
                         let first = &tuples
                             .first()
                             .expect("Map should have at least one tuple")
@@ -800,7 +794,6 @@ impl<'pins> ResolvePinTypes<'pins> {
                         Self { pins, is_progress }
                     }
                     IfElse { condition, inputs } => {
-                        let mut is_progress = false;
                         // Output pins have groups for true and false branch.
                         // Otherwise, each of that group is symmetric to input pins, except for
                         // the first ones that go to the condition predicate.
@@ -841,18 +834,19 @@ impl<'pins> ResolvePinTypes<'pins> {
                     Constant(value) => {
                         let ty = value.type_of();
                         assert_eq!(pins.len(), 1);
-                        let is_progress = ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
+                        is_progress |= ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
 
                         Self { pins, is_progress }
                     }
                     _ => Self {
                         pins,
-                        is_progress: false,
+                        is_progress,
                     },
                 }
             }
         };
 
+        trace!("Resolved pins: {:#?}", result.pins);
         if expect_progress_or_complete && !result.is_progress {
             result.ensure_resolved()
         } else {
@@ -867,14 +861,18 @@ impl<'pins> ResolvePinTypes<'pins> {
     fn prefill_with_static(
         node: &NodeStub,
         pins: &mut Vec<Option<PrimitiveType>>,
-    ) -> Result<(), PinResolutionError> {
+    ) -> Result<bool, PinResolutionError> {
         let output_idx = node.output_pin_start_idx();
+        let mut is_progress = false;
 
+        trace!("static inputs prefill");
         if let Some(static_inputs) = node.static_inputs() {
             debug_assert_eq!(static_inputs.len(), output_idx);
             for (i, t) in static_inputs.iter().copied().enumerate() {
                 if let Some(t) = t.map(Into::into) {
                     if pins[i].is_none() {
+                        trace!("prefill input pin {i} with {t:?}");
+                        is_progress = true;
                         pins[i] = Some(t);
                     } else if pins[i] != Some(t) {
                         return Err(PinResolutionError::UnionConflict);
@@ -883,11 +881,14 @@ impl<'pins> ResolvePinTypes<'pins> {
             }
         }
 
+        trace!("static outputs prefill");
         if let Some(static_outputs) = node.static_outputs() {
             for (i, t) in static_outputs.iter().copied().enumerate() {
                 let i = i + output_idx;
                 if let Some(t) = t.map(Into::into) {
                     if pins[i].is_none() {
+                        trace!("prefill output pin {i} with {t:?}");
+                        is_progress = true;
                         pins[i] = Some(t);
                     } else if pins[i] != Some(t) {
                         return Err(PinResolutionError::UnionConflict);
@@ -896,7 +897,8 @@ impl<'pins> ResolvePinTypes<'pins> {
             }
         }
 
-        Ok(())
+        trace!("static prefill progress = {is_progress}");
+        Ok(is_progress)
     }
 
     /// If either of the pins is `None`, they are unified to the same type.

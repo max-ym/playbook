@@ -23,13 +23,17 @@ impl AssignedType {
 }
 
 /// Assigned types for the canvas nodes.
+#[derive(Debug)]
 pub struct Typed<'canvas> {
     _canvas: PhantomData<&'canvas Canvas<()>>,
 
-    /// This array corresponds by position to the edges in the canvas.
-    /// Since we take reference to the canvas, we know that as long as this
-    /// object is alive, the canvas cannot be modified.
-    edges: Vec<AssignedType>,
+    /// Unique types defined in the canvas.
+    tys: Vec<canvas::PrimitiveType>,
+
+    /// Assigned types for the node pins.
+    /// Inner array is an array of indices into the [Self::tys] array.
+    /// For unresolved pins, the index is [usize::MAX].
+    nodes: Vec<Vec<usize>>,
 }
 
 /// Cycles in the canvas.
@@ -362,9 +366,16 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             self.types.as_ref()
         };
 
+        #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
+        struct NodePin(canvas::NodeIdx, canvas::PinOrder);
+
         struct Resolver<'validator, 'canvas, T> {
             validator: &'validator Validator<'canvas, T>,
             edges: Vec<AssignedType>,
+
+            // List of pins that are not connected to any edge.
+            // Sorted by [NodePin] for binary search.
+            dangling_pins: Vec<(NodePin, AssignedType)>,
             resolve_next: VecDeque<canvas::NodeIdx>,
 
             // Buffer used to represent pin types of nodes, for
@@ -374,6 +385,13 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
         impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
             pub fn new(validator: &'validator Validator<'canvas, T>) -> Self {
+                let total_pins_in_canvas: usize = validator
+                    .canvas
+                    .nodes
+                    .iter()
+                    .map(|node| node.stub.total_pin_count())
+                    .sum();
+                let edge_cnt = validator.canvas.edges.len();
                 Self {
                     validator,
                     edges: vec![
@@ -381,8 +399,9 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                             ty: SmallVec::new(),
                             is_err: false,
                         };
-                        validator.canvas.edges.len()
+                        edge_cnt
                     ],
+                    dangling_pins: Vec::with_capacity(total_pins_in_canvas - edge_cnt),
 
                     // Preallocate big enough queue for possible nodes.
                     resolve_next: VecDeque::with_capacity(validator.canvas.nodes.len().min(512)),
@@ -427,7 +446,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     let _: Never = match result {
                         Ok(result) => {
                             assert!(
-                                result.is_progres(),
+                                result.is_progress(),
                                 "Ok result here should mean progress was made"
                             );
                             trace!("progress was made for node {node_idx}");
@@ -458,6 +477,18 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 }
             }
 
+            fn dangling_pins_mut(
+                &mut self,
+                node: canvas::NodeIdx,
+                pin: canvas::PinOrder,
+            ) -> &mut AssignedType {
+                let idx = self
+                    .dangling_pins
+                    .binary_search_by_key(&NodePin(node, pin), |(np, _)| *np)
+                    .expect("array should be prefilled by this point");
+                &mut self.dangling_pins[idx].1
+            }
+
             fn load_buf_for(&mut self, node_idx: canvas::NodeIdx) {
                 trace!("loading types resolver buffer for node {node_idx}");
                 let stub = &self.canvas().nodes[node_idx as usize].stub;
@@ -471,6 +502,11 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 for edge_idx in node_edges.arr.iter().copied() {
                     let edge = &self.canvas().edges[edge_idx as usize];
                     let ty = &self.edges[edge_idx as usize];
+
+                    if ty.ty.is_empty() {
+                        // No previous resolutions have filled this edge.
+                        continue;
+                    }
 
                     let pin_idx = if edge.from.0 == node_idx {
                         edge.from.1
@@ -499,9 +535,11 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     } else {
                         edge.to.1
                     };
+                    trace!("select pin {pin_idx}");
 
                     assigned_ty.ty.clear();
                     if let Some(ty) = &self.buf[pin_idx as usize] {
+                        trace!("for pin {pin_idx} saving type {ty:?}");
                         assigned_ty.ty.push(ty.clone());
                     }
                 }
@@ -623,5 +661,32 @@ mod tests {
         let cycle = &cycles.cycles[0];
         println!("{cycle:#?}");
         assert!(Cycles::same(cycle, &[3, 2, 1]));
+    }
+
+    #[test]
+    fn resolve0() {
+        crate::tests::init();
+
+        let mut canvas = crate::canvas::Canvas::new();
+        let input_stub = canvas::NodeStub::Input {
+            valid_names: Default::default(),
+        };
+        let parse_int_stub = canvas::NodeStub::ParseInt { signed: false };
+        let ordering_stub = canvas::NodeStub::Ordering;
+
+        let input0 = canvas.add_node(input_stub.clone(), ());
+        let input1 = canvas.add_node(input_stub, ());
+        let parse0 = canvas.add_node(parse_int_stub.clone(), ());
+        let parse1 = canvas.add_node(parse_int_stub, ());
+        let order = canvas.add_node(ordering_stub, ());
+
+        canvas.add_edge(outpin!(input0), inpin!(parse0)).unwrap();
+        canvas.add_edge(outpin!(input1), inpin!(parse1)).unwrap();
+        canvas.add_edge(outpin!(parse0), inpin!(order)).unwrap();
+        canvas.add_edge(outpin!(parse1), inpin!(order)).unwrap();
+
+        let mut validator = Validator::new(&canvas);
+        let types = validator.resolve_types().unwrap();
+        println!("{:#?}", types);
     }
 }
