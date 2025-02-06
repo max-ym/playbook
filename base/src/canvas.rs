@@ -219,6 +219,10 @@ impl Pin {
     pub(crate) const fn only_node_id(node_id: Id) -> Pin {
         Pin { node_id, order: 0 }
     }
+
+    pub(crate) const fn new(node_id: Id, order: PinOrder) -> Pin {
+        Pin { node_id, order }
+    }
 }
 
 /// The [Pin] that is used as an ontput from the node.
@@ -982,7 +986,7 @@ impl<'pins> ResolvePinTypes<'pins> {
         }
     }
 
-    fn is_resolved(&self) -> bool {
+    pub fn is_resolved(&self) -> bool {
         for pin in self.pins.iter() {
             if pin.is_none() {
                 return false;

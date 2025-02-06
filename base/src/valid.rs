@@ -437,6 +437,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             }
 
             fn init_pins(&mut self) {
+                debug!("initialize pins for the resolver");
                 if !self.pins.is_empty() {
                     assert!(!self.node_to_pins.is_empty());
                     return;
@@ -455,43 +456,37 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
                 debug_assert!(self.node_to_pins.is_sorted());
 
-                self.pins = vec![
-                    AssignedType {
-                        ty: None,
-                        is_err: false,
-                    };
-                    self.node_to_pins.len()
-                ];
-
                 trace!("init pins for all nodes, which appear in an edge");
                 let mut cnt = 0;
                 for edge in self.canvas().edges.iter() {
-                    let pin_idx = if edge.from.0 == edge.to.0 {
-                        edge.from.1
-                    } else {
-                        edge.to.1
-                    };
-                    let result = self.node_to_pins.binary_search(&PinMap {
-                        node_idx: edge.from.0,
-                        pin: pin_idx,
+                    let result_to = self.node_to_pins.binary_search(&PinMap {
+                        node_idx: edge.to.0,
+                        pin: edge.to.1,
                         map_idx: usize::MAX,
                     });
-                    if let Ok(i) = result {
-                        self.node_to_pins[i].map_idx = cnt;
-                        cnt += 1;
-                    } else {
-                        // Already initialized.
-                        debug_assert!(self
-                            .node_to_pins
-                            .binary_search_by(|probe| {
-                                probe
-                                    .node_idx
-                                    .cmp(&edge.from.0)
-                                    .then_with(|| probe.pin.cmp(&pin_idx))
-                            })
-                            .is_ok());
+                    let result_from = self.node_to_pins.binary_search(&PinMap {
+                        node_idx: edge.from.0,
+                        pin: edge.from.1,
+                        map_idx: usize::MAX,
+                    });
+
+                    match (result_to, result_from) {
+                        (Err(_), Err(_)) => {
+                            // Already initialized.
+                            continue;
+                        }
+                        (Ok(i), Err(e)) | (Err(e), Ok(i)) => {
+                            let val = self.node_to_pins[e].map_idx;
+                            self.node_to_pins[i].map_idx = val;
+                        }
+                        (Ok(a), Ok(b)) => {
+                            self.node_to_pins[a].map_idx = cnt;
+                            self.node_to_pins[b].map_idx = cnt;
+                            cnt += 1;
+                        }
                     }
                 }
+                trace!("initialized {cnt} pins that appear in an edge");
 
                 trace!("init pins that do not appear in an edge");
                 for pin in self.node_to_pins.iter_mut() {
@@ -500,11 +495,16 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                         cnt += 1;
                     }
                 }
+                trace!("initialized {cnt} total pins");
 
-                // Shrink as some pins are not used, like in case when one
-                // pin participates in an edge, or even in several edges,
-                // reducing total number of "merged" pins in array.
-                self.pins.shrink_to(cnt);
+                // Initialize the pins array with empty types.
+                self.pins = vec![
+                    AssignedType {
+                        ty: None,
+                        is_err: false,
+                    };
+                    cnt
+                ];
 
                 debug_assert!(self
                     .node_to_pins
@@ -574,7 +574,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
                 while let Some(next) = self.resolve_next.pop_back() {
                     self.resolve(next);
-                    
+
                     // Add children to the resolve queue.
                     for child in self.validator.adjacent_child_nodes(next) {
                         self.resolve_next.push_front(child);
@@ -598,13 +598,16 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     let _: Never = match result {
                         Ok(result) => {
                             let is_progress = result.is_progress();
+                            let is_resolved = result.is_resolved();
                             self.save_buf_for(node_idx);
-                            if is_progress {
+                            if is_resolved {
+                                trace!("fully resolved node {node_idx}");
+                                break;
+                            } else if is_progress {
                                 trace!("progress was made for node {node_idx}");
                                 continue;
                             } else {
-                                trace!("fully resolved node {node_idx}");
-                                break;
+                                unreachable!("node should be resolved or progress should be made");
                             }
                         }
                         Err(PinNumberMismatch) => {
@@ -723,10 +726,16 @@ mod tests {
         ($node:expr) => {
             canvas::OutputPin(Pin::only_node_id($node))
         };
+        ($node:expr, $pin:expr) => {
+            canvas::OutputPin(Pin::new($node, $pin))
+        };
     }
     macro_rules! inpin {
         ($node:expr) => {
             canvas::InputPin(Pin::only_node_id($node))
+        };
+        ($node:expr, $pin:expr) => {
+            canvas::InputPin(Pin::new($node, $pin))
         };
     }
 
@@ -836,10 +845,14 @@ mod tests {
         let parse1 = canvas.add_node(parse_int_stub, ());
         let order = canvas.add_node(ordering_stub, ());
 
-        canvas.add_edge(outpin!(input0), inpin!(parse0)).unwrap();
-        canvas.add_edge(outpin!(input1), inpin!(parse1)).unwrap();
-        canvas.add_edge(outpin!(parse0), inpin!(order)).unwrap();
-        canvas.add_edge(outpin!(parse1), inpin!(order)).unwrap();
+        canvas.add_edge(outpin!(input0, 1), inpin!(parse0)).unwrap();
+        canvas.add_edge(outpin!(input1, 1), inpin!(parse1)).unwrap();
+        canvas
+            .add_edge(outpin!(parse0, 1), inpin!(order, 0))
+            .unwrap();
+        canvas
+            .add_edge(outpin!(parse1, 1), inpin!(order, 1))
+            .unwrap();
 
         let mut validator = Validator::new(&canvas);
         let types = validator.resolve_types().unwrap();
