@@ -9,7 +9,7 @@ use crate::canvas::{self, Canvas};
 struct AssignedType {
     /// Assigned type of the edge. Can be empty if not known, or
     /// can have many types if the edge is ambiguous.
-    ty: SmallVec<[canvas::PrimitiveType; 1]>,
+    ty: Option<canvas::PrimitiveType>,
 
     /// Mark the type as erroneous, e.g. when the statically known types of
     /// input and output pins do not match.
@@ -18,7 +18,7 @@ struct AssignedType {
 
 impl AssignedType {
     pub fn is_empty(&self) -> bool {
-        self.ty.is_empty()
+        self.ty.is_none()
     }
 }
 
@@ -366,16 +366,50 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             self.types.as_ref()
         };
 
-        #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
-        struct NodePin(canvas::NodeIdx, canvas::PinOrder);
+        struct PinMap {
+            node_idx: canvas::NodeIdx,
+
+            // Pin number of the node.
+            pin: canvas::PinOrder,
+
+            // Index into 'pins' array.
+            map_idx: usize,
+        }
+
+        impl std::cmp::PartialEq for PinMap {
+            fn eq(&self, other: &Self) -> bool {
+                self.node_idx == other.node_idx && self.pin == other.pin
+            }
+        }
+
+        impl std::cmp::Eq for PinMap {}
+
+        impl std::cmp::PartialOrd for PinMap {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl std::cmp::Ord for PinMap {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.node_idx
+                    .cmp(&other.node_idx)
+                    .then(self.pin.cmp(&other.pin))
+            }
+        }
 
         struct Resolver<'validator, 'canvas, T> {
             validator: &'validator Validator<'canvas, T>,
-            edges: Vec<AssignedType>,
 
-            // List of pins that are not connected to any edge.
-            // Sorted by [NodePin] for binary search.
-            dangling_pins: Vec<(NodePin, AssignedType)>,
+            // Representation of each individual pin in the canvas,
+            // except for those with edges being merged into one pin,
+            // as part of normalization, for type assignment.
+            pins: Vec<AssignedType>,
+
+            // Sorted array of node pins indexes, binary searchable.
+            node_to_pins: Vec<PinMap>,
+
+            // Buffer for the next nodes to resolve.
             resolve_next: VecDeque<canvas::NodeIdx>,
 
             // Buffer used to represent pin types of nodes, for
@@ -391,17 +425,10 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     .iter()
                     .map(|node| node.stub.total_pin_count())
                     .sum();
-                let edge_cnt = validator.canvas.edges.len();
                 Self {
                     validator,
-                    edges: vec![
-                        AssignedType {
-                            ty: SmallVec::new(),
-                            is_err: false,
-                        };
-                        edge_cnt
-                    ],
-                    dangling_pins: Vec::with_capacity(total_pins_in_canvas - edge_cnt),
+                    pins: Vec::new(),
+                    node_to_pins: Vec::with_capacity(total_pins_in_canvas),
 
                     // Preallocate big enough queue for possible nodes.
                     resolve_next: VecDeque::with_capacity(validator.canvas.nodes.len().min(512)),
@@ -409,11 +436,102 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 }
             }
 
-            pub fn finish(self) -> Typed<'canvas> {
-                Typed {
-                    _canvas: PhantomData,
-                    edges: self.edges,
+            fn init_pins(&mut self) {
+                if !self.pins.is_empty() {
+                    assert!(!self.node_to_pins.is_empty());
+                    return;
                 }
+
+                for (node_idx, node) in self.validator.canvas.nodes.iter().enumerate() {
+                    let stub = &node.stub;
+                    for pin in 0..stub.total_pin_count() {
+                        self.node_to_pins.push(PinMap {
+                            node_idx: node_idx as canvas::NodeIdx,
+                            pin: pin as canvas::PinOrder,
+                            map_idx: usize::MAX, // tmp invalid value
+                        });
+                    }
+                }
+
+                debug_assert!(self.node_to_pins.is_sorted());
+
+                self.pins = vec![
+                    AssignedType {
+                        ty: None,
+                        is_err: false,
+                    };
+                    self.node_to_pins.len() - self.canvas().edges.len()
+                ];
+
+                trace!("init pins for all nodes, which appear in an edge");
+                let mut cnt = 0;
+                for edge in self.canvas().edges.iter() {
+                    let pin_idx = if edge.from.0 == edge.to.0 {
+                        edge.from.1
+                    } else {
+                        edge.to.1
+                    };
+                    let result = self.node_to_pins.binary_search(&PinMap {
+                        node_idx: edge.from.0,
+                        pin: pin_idx,
+                        map_idx: usize::MAX,
+                    });
+                    if let Ok(i) = result {
+                        self.node_to_pins[i].map_idx = cnt;
+                        cnt += 1;
+                    } else {
+                        // Already initialized.
+                        debug_assert!(self
+                            .node_to_pins
+                            .binary_search_by(|probe| {
+                                probe
+                                    .node_idx
+                                    .cmp(&edge.from.0)
+                                    .then_with(|| probe.pin.cmp(&pin_idx))
+                            })
+                            .is_ok());
+                    }
+                }
+
+                trace!("init pins that do not appear in an edge");
+                for pin in self.node_to_pins.iter_mut() {
+                    if pin.map_idx == usize::MAX {
+                        pin.map_idx = cnt;
+                        cnt += 1;
+                    }
+                }
+
+                debug_assert!(self
+                    .node_to_pins
+                    .iter()
+                    .all(|pin| pin.map_idx != usize::MAX));
+            }
+
+            fn pin_ty_mut(
+                &mut self,
+                node_idx: canvas::NodeIdx,
+                pin: canvas::PinOrder,
+            ) -> &mut AssignedType {
+                debug_assert!(!self.pins.is_empty());
+
+                let idx = self
+                    .node_to_pins
+                    .binary_search_by(|probe| {
+                        probe
+                            .node_idx
+                            .cmp(&node_idx)
+                            .then_with(|| probe.pin.cmp(&pin))
+                    })
+                    .expect("pin should be defined in the map by this point");
+                let map = &self.node_to_pins[idx];
+                let mapped_idx = map.map_idx;
+
+                trace!("resolved pin {pin} for node {node_idx} as map idx {mapped_idx}");
+                &mut self.pins[mapped_idx]
+            }
+
+            pub fn finish(self) -> Typed<'canvas> {
+                todo!()
             }
 
             fn canvas(&self) -> &'canvas Canvas<T> {
@@ -421,6 +539,8 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             }
 
             pub fn resolve_all(&mut self) {
+                self.init_pins();
+
                 // We start from the root nodes and then propagate the types.
                 self.resolve_next
                     .extend(self.canvas().root_nodes.iter().copied());
@@ -445,13 +565,15 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                     let result = ResolvePinTypes::resolve(stub, &mut self.buf, true);
                     let _: Never = match result {
                         Ok(result) => {
-                            assert!(
-                                result.is_progress(),
-                                "Ok result here should mean progress was made"
-                            );
-                            trace!("progress was made for node {node_idx}");
+                            let is_progress = result.is_progress();
                             self.save_buf_for(node_idx);
-                            continue;
+                            if is_progress {
+                                trace!("progress was made for node {node_idx}");
+                                continue;
+                            } else {
+                                trace!("fully resolved node {node_idx}");
+                                break;
+                            }
                         }
                         Err(PinNumberMismatch) => {
                             unreachable!("pin number mismatch, invalid preallocation?");
@@ -477,16 +599,31 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 }
             }
 
-            fn dangling_pins_mut(
-                &mut self,
-                node: canvas::NodeIdx,
-                pin: canvas::PinOrder,
-            ) -> &mut AssignedType {
-                let idx = self
-                    .dangling_pins
-                    .binary_search_by_key(&NodePin(node, pin), |(np, _)| *np)
-                    .expect("array should be prefilled by this point");
-                &mut self.dangling_pins[idx].1
+            fn node_pins(&self, node_idx: canvas::NodeIdx) -> &[PinMap] {
+                trace!("get pins for node {node_idx}");
+                debug_assert!(!self.node_to_pins.is_empty());
+                debug_assert!(self.node_to_pins.is_sorted());
+
+                let start = self
+                    .node_to_pins
+                    .binary_search_by(|probe| {
+                        probe
+                            .node_idx
+                            .cmp(&node_idx)
+                            .then_with(|| probe.pin.cmp(&canvas::PinOrder::MIN))
+                    })
+                    .expect("node pins should be defined in the map by this point");
+                let end = match self.node_to_pins.binary_search_by(|probe| {
+                    probe
+                        .node_idx
+                        .cmp(&(node_idx))
+                        .then_with(|| probe.pin.cmp(&canvas::PinOrder::MAX))
+                }) {
+                    Ok(end) => end + 1,
+                    Err(end) => end,
+                };
+                trace!("pins range for {node_idx} is {start}..{end}");
+                &self.node_to_pins[start..end]
             }
 
             fn load_buf_for(&mut self, node_idx: canvas::NodeIdx) {
@@ -497,61 +634,45 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 self.buf
                     .resize_with(stub.total_pin_count(), Default::default);
 
-                // Find all edges and load their currently-known types.
-                let node_edges = &self.validator.node_edges[node_idx as usize];
-                for edge_idx in node_edges.arr.iter().copied() {
-                    let edge = &self.canvas().edges[edge_idx as usize];
-                    let ty = &self.edges[edge_idx as usize];
-
-                    if ty.ty.is_empty() {
-                        // No previous resolutions have filled this edge.
-                        continue;
-                    }
-
-                    let pin_idx = if edge.from.0 == node_idx {
-                        edge.from.1
-                    } else {
-                        edge.to.1
-                    };
-
-                    self.buf[pin_idx as usize] = if ty.is_err {
-                        None
-                    } else {
-                        Some(ty.ty[0].clone())
-                    };
+                let mut buf = std::mem::take(&mut self.buf);
+                for pin_map in self.node_pins(node_idx) {
+                    let pin_idx = pin_map.map_idx;
+                    trace!("mapped pin to index {pin_idx}");
+                    let ty = &self.pins[pin_idx].ty;
+                    buf[pin_map.pin as usize] = ty.to_owned();
+                    trace!("loaded type {ty:?} for pin {} to buffer", pin_map.pin);
                 }
+
+                std::mem::swap(&mut self.buf, &mut buf);
+                trace!("loaded types resolver buffer for node {node_idx} as {:?}", self.buf);
             }
 
             fn save_buf_for(&mut self, node: canvas::NodeIdx) {
                 trace!("saving types from types resolver buffer for node {node}");
 
+                let mut buf = std::mem::take(&mut self.buf);
+                for (pin_idx, ty) in buf.drain(..).enumerate() {
+                    trace!("save type {ty:?} for pin {pin_idx}");
+                    self.pin_ty_mut(node, pin_idx as canvas::PinOrder).ty = ty;
+                }
+
+                std::mem::swap(&mut self.buf, &mut buf);
+            }
+
+            /// Mark this node as erroneous.
+            fn mark_node_err(&mut self, node: canvas::NodeIdx) {
+                // TODO this can be done simpler since we have 'pins' array now.
+
+                trace!("marking all {node} node's edges as erroneous");
                 let node_edges = &self.validator.node_edges[node as usize];
                 for edge_idx in node_edges.arr.iter().copied() {
                     let edge = &self.canvas().edges[edge_idx as usize];
-                    let assigned_ty = &mut self.edges[edge_idx as usize];
-
                     let pin_idx = if edge.from.0 == node {
                         edge.from.1
                     } else {
                         edge.to.1
                     };
-                    trace!("select pin {pin_idx}");
-
-                    assigned_ty.ty.clear();
-                    if let Some(ty) = &self.buf[pin_idx as usize] {
-                        trace!("for pin {pin_idx} saving type {ty:?}");
-                        assigned_ty.ty.push(ty.clone());
-                    }
-                }
-            }
-
-            /// Mark this node as erroneous.
-            fn mark_node_err(&mut self, node: canvas::NodeIdx) {
-                trace!("marking all {node} node's edges as erroneous");
-                let node_edges = &self.validator.node_edges[node as usize];
-                for edge_idx in node_edges.arr.iter().copied() {
-                    let assigned_ty = &mut self.edges[edge_idx as usize];
-                    assigned_ty.is_err = true;
+                    self.pin_ty_mut(node, pin_idx).is_err = true;
                 }
             }
         }
