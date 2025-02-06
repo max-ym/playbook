@@ -23,7 +23,7 @@ impl AssignedType {
 }
 
 /// Assigned types for the canvas nodes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Typed<'canvas> {
     _canvas: PhantomData<&'canvas Canvas<()>>,
 
@@ -857,5 +857,37 @@ mod tests {
         let mut validator = Validator::new(&canvas);
         let types = validator.resolve_types().unwrap();
         println!("{:#?}", types);
+
+        let mut t = types.to_owned();
+        use canvas::PrimitiveType as PT;
+        let expect_types = [
+            PT::Str,
+            PT::Ordering,
+            PT::File,
+            PT::Result(Box::new(PT::Int)),
+        ];
+        for expect in expect_types {
+            let pos = t
+                .tys
+                .iter()
+                .position(|ty| *ty == expect)
+                .expect("missing expected type in the resolved types array");
+            t.tys.remove(pos);
+        }
+        if !t.tys.is_empty() {
+            panic!("unexpected types in the resolved types array: {:#?}", t.tys);
+        }
+
+        let expect_nodes = [
+            vec![2, 0],
+            vec![2, 0],
+            vec![0, 3],
+            vec![0, 3],
+            vec![3, 3, 1],
+        ];
+
+        for (node, expect) in validator.types.unwrap().nodes.iter().zip(expect_nodes.iter()) {
+            assert_eq!(node.as_slice(), expect.as_slice());
+        }
     }
 }
