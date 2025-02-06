@@ -84,6 +84,19 @@ impl<NodeMeta> Canvas<NodeMeta> {
         Some(node)
     }
 
+    pub fn get_edge(&self, idx: EdgeIdx) -> Option<Edge> {
+        self.edges.get(idx as usize).map(|e| Edge {
+            from: OutputPin(Pin {
+                node_id: self.nodes[e.from.0 as usize].id,
+                order: e.from.1,
+            }),
+            to: InputPin(Pin {
+                node_id: self.nodes[e.to.0 as usize].id,
+                order: e.to.1,
+            }),
+        })
+    }
+
     pub fn edges(&self) -> impl Iterator<Item = Edge> + use<'_, NodeMeta> {
         self.edges.iter().map(|e| Edge {
             from: OutputPin(Pin {
@@ -715,7 +728,7 @@ impl<'pins> ResolvePinTypes<'pins> {
     /// The `set` parameter is a vector holding the resolved types of the input and output pins.
     /// Resolver cannot change those but it can use them to determine the types of other pins.
     /// Vector should be the same length as the number of pins of the node.
-    /// 
+    ///
     /// `expect_progress_or_complete` should be set to true if the context expects to have
     /// any progress in the resolution. If no progress is made, the function will return an error.
     /// The error is silenced for already fully resolved nodes.
@@ -1176,4 +1189,63 @@ pub enum StrOp {
         /// Remove given substrings from the input.
         remove: SmallVec<[CompactString; 1]>,
     },
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn add_edge() {
+        crate::tests::init();
+
+        let stub = NodeStub::Todo {
+            msg: CompactString::from("test"),
+            inputs: 1,
+        };
+
+        let mut canvas = Canvas::<()>::new();
+        let a = canvas.add_node(stub.clone(), ());
+        let b = canvas.add_node(stub.clone(), ());
+        let c = canvas.add_node(stub, ());
+
+        let outa = OutputPin(Pin {
+            node_id: a,
+            order: 0,
+        });
+        let inpb = InputPin(Pin {
+            node_id: b,
+            order: 0,
+        });
+        let outb = OutputPin(Pin {
+            node_id: b,
+            order: 0,
+        });
+        let inpc = InputPin(Pin {
+            node_id: c,
+            order: 0,
+        });
+        let outc = OutputPin(Pin {
+            node_id: a,
+            order: 0,
+        });
+        let inpa = InputPin(Pin {
+            node_id: a,
+            order: 0,
+        });
+
+        let ab = canvas.add_edge(outa, inpb).unwrap();
+        let ab = canvas.get_edge(ab).unwrap();
+        let bc = canvas.add_edge(outb, inpc).unwrap();
+        let bc = canvas.get_edge(bc).unwrap();
+        let ca = canvas.add_edge(outc, inpa).unwrap();
+        let ca = canvas.get_edge(ca).unwrap();
+
+        assert_eq!(ab.from, outa);
+        assert_eq!(ab.to, inpb);
+        assert_eq!(bc.from, outb);
+        assert_eq!(bc.to, inpc);
+        assert_eq!(ca.from, outc);
+        assert_eq!(ca.to, inpa);
+    }
 }
