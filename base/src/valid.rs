@@ -886,7 +886,13 @@ mod tests {
             vec![3, 3, 1],
         ];
 
-        for (node, expect) in validator.types.unwrap().nodes.iter().zip(expect_nodes.iter()) {
+        for (node, expect) in validator
+            .types
+            .unwrap()
+            .nodes
+            .iter()
+            .zip(expect_nodes.iter())
+        {
             assert_eq!(node.as_slice(), expect.as_slice());
         }
     }
