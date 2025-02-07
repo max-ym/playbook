@@ -206,15 +206,8 @@ pub struct Pin {
     pub order: PinOrder,
 }
 
+#[cfg(test)]
 impl Pin {
-    /// Construct a zero pin. It has zeroed node ID and order.
-    pub(crate) const fn zero() -> Pin {
-        Pin {
-            node_id: Id(0),
-            order: 0,
-        }
-    }
-
     /// Construct a pin with only the node ID set, and order set to zero.
     pub(crate) const fn only_node_id(node_id: Id) -> Pin {
         Pin { node_id, order: 0 }
@@ -253,27 +246,6 @@ impl Deref for InputPin {
 pub(crate) struct EdgeInner {
     pub from: (NodeIdx, PinOrder),
     pub to: (NodeIdx, PinOrder),
-}
-
-impl EdgeInner {
-    /// Binary search for the edge that starts from the given node.
-    /// Since edges are sorted by the starting node, we can use binary search.
-    /// Returned index is the first node that has the same starting node as the given one.
-    pub(crate) fn binary_search_from<T>(canvas: &Canvas<T>, node: NodeIdx) -> EdgeIdx {
-        let result = canvas.edges.binary_search(&EdgeInner::only_from_node(node));
-        (match result {
-            Ok(idx) => idx,
-            Err(idx) => idx,
-        }) as EdgeIdx
-    }
-
-    /// To be used for binary search, to indicate the first node that has the same starting node.
-    fn only_from_node(node: NodeIdx) -> Self {
-        Self {
-            from: (node, 0),
-            to: (0, 0),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
