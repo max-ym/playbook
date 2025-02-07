@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, marker::PhantomData};
+use std::{borrow::Borrow, collections::VecDeque, marker::PhantomData};
 
 use log::{debug, info, trace};
 use smallvec::SmallVec;
@@ -32,7 +32,55 @@ pub struct Typed<'canvas> {
 }
 
 impl Typed<'_> {
-    pub const UNRESOLVER_TYPE: usize = usize::MAX;
+    /// Special type index for unresolved types.
+    const UNRESOLVER_TYPE: usize = usize::MAX;
+
+    /// Whether all the nodes in the canvas have fully resolved types.
+    pub fn is_fully_resolved(&self) -> bool {
+        self.nodes
+            .iter()
+            .all(|node| node.iter().all(|&ty| ty != Self::UNRESOLVER_TYPE))
+    }
+}
+
+impl<'canvas, T> Canvas<T> {
+    /// Get pin type for given pin. Returns [Ok] of [None] if the pin has no resolved type.
+    pub fn pin_type<'typed>(
+        &'canvas self,
+        typed: &'typed Typed<'canvas>,
+        pin: impl Borrow<canvas::Pin>,
+    ) -> Result<Option<&'typed canvas::PrimitiveType>, PinQueryError> {
+        use PinQueryError::*;
+        let pin: &canvas::Pin = pin.borrow();
+        let node = self
+            .node_id_to_idx(pin.node_id)
+            .ok_or(NodeNotFound(pin.node_id))?;
+        let order = pin.order;
+
+        let idx = typed
+            .nodes
+            .get(node as usize)
+            .ok_or(NodeNotFound(pin.node_id))?
+            .get(order as usize)
+            .ok_or(PinNotFound(pin.to_owned()))?
+            .to_owned();
+
+        if idx == Typed::UNRESOLVER_TYPE {
+            Ok(None)
+        } else {
+            Ok(typed.types.get(idx))
+        }
+    }
+}
+
+/// Error that can happen when querying the pin type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinQueryError {
+    /// Node does not (anymore) exist in the canvas.
+    NodeNotFound(canvas::Id),
+
+    /// Pin does not exist in the node.
+    PinNotFound(canvas::Pin),
 }
 
 /// Cycles in the canvas.

@@ -63,7 +63,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         self.node_id_to_idx(id).map(|idx| &self.nodes[idx as usize])
     }
 
-    fn node_id_to_idx(&self, id: Id) -> Option<NodeIdx> {
+    pub(crate) fn node_id_to_idx(&self, id: Id) -> Option<NodeIdx> {
         // Node array is sorted, so we can use binary search.
         debug_assert!(self.nodes.is_sorted_by_key(|n| n.id));
         self.nodes
