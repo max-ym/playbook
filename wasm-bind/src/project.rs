@@ -475,7 +475,7 @@ pub struct JsMapNodeStubBuilder {
     map: HashMap<base::canvas::Pat, base::canvas::Value>,
 
     #[wasm_bindgen(getter_with_clone)]
-    pub wildcard: Option<Vec<JsDataInstance>>,
+    pub wildcard: Vec<JsDataInstance>,
 }
 
 #[wasm_bindgen(js_class = MapNodeStubBuilder)]
@@ -491,14 +491,22 @@ impl JsMapNodeStubBuilder {
 
     /// Validate and build the map node stub.
     pub fn build(self) -> Result<JsMapNodeStub, JsError> {
+        let wildcard = if self.wildcard.is_empty() {
+            None
+        } else if self.wildcard.len() == 1 {
+            let w = self.wildcard.into_iter().next().unwrap();
+            Some(w.value)
+        } else {
+            Some(base::canvas::Value::Array(
+                self.wildcard.into_iter().map(|v| v.value).collect(),
+            ))
+        };
+
         if self.map.is_empty() {
             return Ok(JsMapNodeStub {
                 stub: base::canvas::NodeStub::Map {
                     tuples: Default::default(),
-                    wildcard: self
-                        .wildcard
-                        .map(|v| v.into_iter().map(|v| v.value).collect())
-                        .unwrap_or_default(),
+                    wildcard,
                 }
                 .into(),
             });
@@ -512,28 +520,19 @@ impl JsMapNodeStubBuilder {
             .next()
             .expect("at least one key should exist, per guard above");
 
-        for (k, v) in self.map.iter().skip(1) {
-            if !k.is_compatible_with(first_pat) {
+        for (pat, val) in self.map.iter().skip(1) {
+            if !pat.is_compatible_with(first_pat) {
                 return Err(JsError::new("all keys should have the same types"));
             }
-            if !v.is_same_type(first_val) {
+            if !val.is_same_type(first_val) {
                 return Err(JsError::new("all values should have the same type"));
             }
         }
 
-        let mut entries = Vec::with_capacity(self.map.len());
-        for (k, v) in self.map {
-            let pat = base::canvas::Pat::from_direct_or_variants_array(v);
-            entries.push((pat, k));
-        }
-
         Ok(JsMapNodeStub {
             stub: base::canvas::NodeStub::Map {
-                tuples: entries,
-                wildcard: match self.wildcard.map(|v| v.value) {
-                    Some(v) => v,
-                    None => SmallVec::new(),
-                },
+                tuples: self.map.into_iter().collect(),
+                wildcard,
             }
             .into(),
         })
@@ -551,16 +550,17 @@ pub struct JsMapNodeStub {
 impl JsMapNodeStub {
     #[wasm_bindgen(getter, js_name = map)]
     pub fn map(&self) -> js_sys::Map {
-        if let base::canvas::NodeStub::Map { tuples, wildcard } = &self.stub {
-            let mut map = js_sys::Map::new();
+        if let base::canvas::NodeStub::Map { tuples, .. } = &self.stub.stub {
+            let map = js_sys::Map::new();
 
-            for (pat, value) in tuples {
-                for key in pat
-                    .as_variants()
-                    .expect("currently the only supported option")
-                {
-                    map.set(&JsString::from(key), &JsString::from(value));
-                }
+            for (pat, value) in tuples.clone() {
+                map.set(
+                    &JsDataInstance {
+                        value: pat.into_value(),
+                    }
+                    .into(),
+                    &JsDataInstance { value }.into(),
+                );
             }
 
             map

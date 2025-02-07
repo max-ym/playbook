@@ -162,7 +162,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         Some(node)
     }
 
-    pub fn get_edge(&self, idx: EdgeIdx) -> Option<Edge> {
+    pub(crate) fn get_edge(&self, idx: EdgeIdx) -> Option<Edge> {
         self.edges.get(idx as usize).map(|e| Edge {
             from: OutputPin(Pin {
                 node_id: self.nodes[e.from.0 as usize].id,
@@ -200,7 +200,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         &mut self,
         from: OutputPin,
         to: InputPin,
-    ) -> Result<(), NodeNotFoundError> {
+    ) -> Result<Edge, NodeNotFoundError> {
         let from_idx = self
             .node_id_to_idx(from.node_id)
             .ok_or(NodeNotFoundError(from.node_id))?;
@@ -213,18 +213,22 @@ impl<NodeMeta> Canvas<NodeMeta> {
             to: (to_idx, to.order),
         };
 
-        if let Err(idx) = self.edges.binary_search(&edge) {
-            self.edges.insert(idx, edge);
+        let idx = match self.edges.binary_search(&edge) {
+            Ok(idx) => idx,
+            Err(idx) => {
+                self.edges.insert(idx, edge);
+                idx
+            }
         };
 
         self.unroot_node(to_idx);
 
-        Ok(())
+        Ok(self.get_edge(idx as EdgeIdx).unwrap())
     }
 
     /// See [Canvas::add_edge_by_parts].
     pub fn add_edge(&mut self, edge: Edge) -> Result<(), NodeNotFoundError> {
-        self.add_edge_by_parts(edge.from, edge.to)
+        self.add_edge_by_parts(edge.from, edge.to).map(|_| ())
     }
 
     /// Remove the edge from the canvas.
@@ -472,8 +476,8 @@ pub enum NodeStub {
     /// Map values of one type to another values of possibly other type. Maps should be exhaustive.
     Map {
         /// Array of patterns to match input tuples, and corresponding output tuples.
-        tuples: SmallVec<[(Pat, SmallVec<[Value; 1]>); 1]>,
-        wildcard: SmallVec<[Value; 1]>, // optional
+        tuples: SmallVec<[(Pat, Value); 1]>,
+        wildcard: Option<Value>,
     },
 
     /// List of values of some type. Can be used for filtering or
@@ -485,7 +489,7 @@ pub enum NodeStub {
     /// For each item, values should be of the same type.
     List {
         /// List should have at least one value.
-        values: SmallVec<[SmallVec<[Value; 1]>; 1]>,
+        values: SmallVec<[Value; 1]>,
     },
 
     /// Check the boolean predicate and execute either branch.
@@ -730,7 +734,7 @@ impl NodeStub {
             List { .. } => self.input_pin_count(),
             IfElse { inputs, .. } => *inputs,
             Regex(regex) => regex.captures_len() as PinOrder,
-            Map { tuples, .. } => tuples[0].1.len() as PinOrder,
+            Map { tuples, .. } => tuples[0].1.array_len().unwrap_or(1) as PinOrder,
             _ => unreachable!("total_pin_count should be implemented for {self:?}"),
         }
     }
@@ -745,7 +749,7 @@ impl NodeStub {
             Comment { inputs, .. } | Todo { inputs, .. } => *inputs,
             Func(predicate) => predicate.inputs.len() as PinOrder,
             Match { inputs, .. } => *inputs,
-            List { values } => values[0].len() as PinOrder,
+            List { values } => values[0].array_len().unwrap_or(1) as PinOrder,
             IfElse { inputs, condition } => condition.inputs.len() as PinOrder + *inputs,
             Map { tuples, .. } => tuples.len() as PinOrder,
             _ => unreachable!("input_pin_count should be implemented for {self:?}"),
@@ -1130,41 +1134,40 @@ pub enum PinResolutionError {
 /// Pattern for matching values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Pat {
-    // Currently we support only "or" patterns or plain values.
-    values: SmallVec<[Value; 1]>,
+    value: Value,
 }
 
 impl Pat {
-    pub fn from_variants(variants: SmallVec<[Value; 1]>) -> Self {
-        Self { values: variants }
-    }
-
-    pub fn from_inner_variants_array(variants: Value) -> Result<Self, Value> {
-        match variants {
-            Value::Array(v) => Ok(Self::from_variants(v.into())),
-            v => Err(v),
+    pub fn from_variants(variants: Vec<Value>) -> Self {
+        Self {
+            value: Value::Array(variants.into()),
         }
     }
 
-    pub fn from_direct_or_variants_array(variants: Value) -> Self {
-        match Self::from_inner_variants_array(variants) {
-            Ok(v) => v,
-            Err(v) => Self::from_variants(smallvec::smallvec![v])
-        }
+    pub fn from_value(value: Value) -> Self {
+        Self { value }
     }
 
     /// Get the variants of the pattern, if it is an "or" pattern.
     pub fn as_variants(&self) -> Option<&[Value]> {
-        Some(&self.values)
+        match self.value {
+            Value::Array(ref v) => Some(v),
+            _ => None,
+        }
     }
 
     /// Whether these two patterns can be inside the same pattern list.
     /// Basically, this checks type compatibility.
     pub fn is_compatible_with(&self, other: &Self) -> bool {
-        self.values
-            .iter()
-            .zip(other.values.iter())
-            .all(|(a, b)| a.type_of() == b.type_of())
+        self.value.type_of() == other.value.type_of()
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn into_value(self) -> Value {
+        self.value
     }
 }
 
@@ -1216,7 +1219,7 @@ impl Value {
     }
 
     /// Get the length of the array, if this value is an array.
-    pub fn array_length(&self) -> Option<usize> {
+    pub fn array_len(&self) -> Option<usize> {
         match self {
             Value::Array(v) => Some(v.len()),
             _ => None,
@@ -1226,6 +1229,35 @@ impl Value {
     /// Whether this value has the same type as the other value.
     pub fn is_same_type(&self, other: &Self) -> bool {
         self.type_of() == other.type_of()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Value> {
+        return match self {
+            Value::Array(v) => Iter::Array(v.iter()),
+            v => Iter::Single(v),
+        };
+
+        enum Iter<'a> {
+            Array(std::slice::Iter<'a, Value>),
+            Single(&'a Value),
+            Exhausted,
+        }
+
+        impl<'a> Iterator for Iter<'a> {
+            type Item = &'a Value;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if let Iter::Array(iter) = self {
+                    iter.next()
+                } else {
+                    match std::mem::replace(self, Iter::Exhausted) {
+                        Iter::Single(v) => Some(v),
+                        Iter::Exhausted => None,
+                        Iter::Array(_) => unreachable!(),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1403,11 +1435,8 @@ mod test {
         });
 
         let ab = canvas.add_edge_by_parts(outa, inpb).unwrap();
-        let ab = canvas.get_edge(ab).unwrap();
         let bc = canvas.add_edge_by_parts(outb, inpc).unwrap();
-        let bc = canvas.get_edge(bc).unwrap();
         let ca = canvas.add_edge_by_parts(outc, inpa).unwrap();
-        let ca = canvas.get_edge(ca).unwrap();
 
         assert_eq!(ab.from, outa);
         assert_eq!(ab.to, inpb);
