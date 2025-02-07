@@ -697,7 +697,7 @@ pub enum JsDataTypeKind {
     Option,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[wasm_bindgen(js_name = DataType)]
 pub struct JsDataType {
     repr: base::canvas::PrimitiveType,
@@ -842,21 +842,27 @@ impl JsDataInstance {
                 }
                 arr.into()
             }
-            Predicate(predicate) => todo!(),
+            Predicate(predicate) => JsPredicate {
+                inputs: predicate.inputs.iter().map(|t| t.clone().into()).collect(),
+                outputs: predicate.outputs.iter().map(|t| t.clone().into()).collect(),
+            }
+            .into(),
             Result { value, is_ok } => JsResult {
                 value: JsDataInstance {
                     value: value.deref().clone(),
                 }
                 .into(),
                 is_ok: *is_ok,
-            }.into(),
+            }
+            .into(),
             Option { value, is_some } => JsOption {
                 value: JsDataInstance {
                     value: value.deref().clone(),
                 }
                 .into(),
                 is_some: *is_some,
-            }.into(),
+            }
+            .into(),
         }
     }
 }
@@ -901,6 +907,16 @@ pub struct JsOption {
 
     #[wasm_bindgen(readonly, js_name = isSome)]
     pub is_some: bool,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Predicate)]
+pub struct JsPredicate {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub inputs: Vec<JsDataType>,
+
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub outputs: Vec<JsDataType>,
 }
 
 /// Peek into the flow of values. This is useful for debugging and analysis.
