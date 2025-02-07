@@ -7,19 +7,12 @@ use crate::canvas::{self, Canvas};
 
 #[derive(Debug, Clone)]
 struct AssignedType {
-    /// Assigned type of the edge. Can be empty if not known, or
-    /// can have many types if the edge is ambiguous.
+    /// Assigned type of the edge. Can be empty if not known.
     ty: Option<canvas::PrimitiveType>,
 
     /// Mark the type as erroneous, e.g. when the statically known types of
     /// input and output pins do not match.
     is_err: bool,
-}
-
-impl AssignedType {
-    pub fn is_empty(&self) -> bool {
-        self.ty.is_none()
-    }
 }
 
 /// Assigned types for the canvas nodes.
@@ -28,7 +21,7 @@ pub struct Typed<'canvas> {
     _canvas: PhantomData<&'canvas Canvas<()>>,
 
     /// Unique types defined in the canvas.
-    tys: Vec<canvas::PrimitiveType>,
+    types: Vec<canvas::PrimitiveType>,
 
     /// Assigned types for the node pins.
     /// Inner array is an array of indices into the [Self::tys] array.
@@ -87,10 +80,6 @@ struct NodeEdges {
 }
 
 impl NodeEdges {
-    fn inputs(&self) -> &[canvas::EdgeIdx] {
-        &self.arr[..self.split_at as usize]
-    }
-
     fn inputs_mut(&mut self) -> &mut [canvas::EdgeIdx] {
         &mut self.arr[..self.split_at as usize]
     }
@@ -137,7 +126,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
     ///
     /// This does nothing if the table is already filled.
     pub fn collect_node_edges_table(&mut self) {
-        if self.node_edges.len() > 0 {
+        if !self.node_edges.is_empty() {
             assert_eq!(
                 self.node_edges.len(),
                 self.canvas.nodes.len(),
@@ -227,7 +216,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             type Item = canvas::NodeIdx;
 
             fn next(&mut self) -> Option<Self::Item> {
-                while let Some(edge) = self.iter.next() {
+                for edge in &mut self.iter {
                     let edge = self.validator.canvas.edges[edge as usize];
                     let node = edge.to.0;
                     if Some(node) != self.prev {
@@ -250,7 +239,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 // We search as such:
                 // Take any root node, and do a DFS search.
                 // If we find a cycle, we mark it and continue with other unvisited nodes.
-                let mut visitor = Visitor::new(&self.canvas);
+                let mut visitor = Visitor::new(self.canvas);
                 let mut cycles = SmallVec::<[_; 8]>::new();
 
                 debug!("detect cycles in the canvas for flows from root nodes");
@@ -335,8 +324,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             fn collect_cycle(&self, head: canvas::NodeIdx) -> Vec<canvas::NodeIdx> {
                 trace!("collect cycle for head node {head}");
                 let mut rewind_stack = SmallVec::<[_; 64]>::new();
-                let mut iter = self.stack.iter().copied().rev();
-                while let Some(next) = iter.next() {
+                for next in self.stack.iter().copied().rev() {
                     rewind_stack.push(next);
                     if next == head {
                         break;
@@ -556,7 +544,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
                 Typed {
                     _canvas: PhantomData,
-                    tys: types,
+                    types,
                     nodes,
                 }
             }
@@ -868,14 +856,17 @@ mod tests {
         ];
         for expect in expect_types {
             let pos = t
-                .tys
+                .types
                 .iter()
                 .position(|ty| *ty == expect)
                 .expect("missing expected type in the resolved types array");
-            t.tys.remove(pos);
+            t.types.remove(pos);
         }
-        if !t.tys.is_empty() {
-            panic!("unexpected types in the resolved types array: {:#?}", t.tys);
+        if !t.types.is_empty() {
+            panic!(
+                "unexpected types in the resolved types array: {:#?}",
+                t.types
+            );
         }
 
         let expect_nodes = [
