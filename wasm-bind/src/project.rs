@@ -470,61 +470,73 @@ impl JsRegexNodeStub {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = MapNodeStubBuilder)]
 pub struct JsMapNodeStubBuilder {
-    /// Reverse map of "match"'s values to keys.
-    map: HashMap<CompactString, SmallVec<[CompactString; 1]>>,
+    /// Map given pattern to given value(s). Many values can be given,
+    /// if the node has several outputs, corresponding to each value position.
+    map: HashMap<base::canvas::Pat, base::canvas::Value>,
 
-    input_ty: Option<base::canvas::PrimitiveType>,
-    output_ty: Option<base::canvas::PrimitiveType>,
-
-    wildcard: Option<CompactString>,
+    #[wasm_bindgen(getter_with_clone)]
+    pub wildcard: Option<Vec<JsDataInstance>>,
 }
 
 #[wasm_bindgen(js_class = MapNodeStubBuilder)]
 impl JsMapNodeStubBuilder {
-    pub fn add(&mut self, key: JsString, value: JsString) {
-        let key = CompactString::from(String::from(key));
-        let value = CompactString::from(String::from(value));
-        self.map.entry(value).or_default().push(key);
+    /// Add "or pattern" to the map. This is a pattern that matches any of the given keys.
+    /// The output value will be set to the given value.
+    /// If this function was already called for given keys, the value will remain as was set
+    /// by the first call.
+    pub fn or_pat(&mut self, keys: Vec<JsDataInstance>, value: JsDataInstance) {
+        let pat = base::canvas::Pat::from_variants(keys.into_iter().map(|v| v.value).collect());
+        self.map.entry(pat).or_insert(value.value);
     }
 
-    #[wasm_bindgen(js_name = withWildcard)]
-    pub fn set_wildcard(&mut self, value: JsString) {
-        self.wildcard = Some(CompactString::from(String::from(value)));
-    }
-
-    #[wasm_bindgen(js_name = withInputType)]
-    pub fn set_input_ty(&mut self, ty: JsDataType) {
-        self.input_ty = Some(base::canvas::PrimitiveType::from(ty));
-    }
-
-    #[wasm_bindgen(js_name = withOutputType)]
-    pub fn set_output_ty(&mut self, ty: JsDataType) {
-        self.output_ty = Some(base::canvas::PrimitiveType::from(ty));
-    }
-
+    /// Validate and build the map node stub.
     pub fn build(self) -> Result<JsMapNodeStub, JsError> {
-        let input_ty = if let Some(input_ty) = self.input_ty {
-            input_ty
-        } else {
-            return Err(JsError::new("Input type is required"));
-        };
-        let output_ty = if let Some(output_ty) = self.output_ty {
-            output_ty
-        } else {
-            return Err(JsError::new("Output type is required"));
-        };
+        if self.map.is_empty() {
+            return Ok(JsMapNodeStub {
+                stub: base::canvas::NodeStub::Map {
+                    tuples: Default::default(),
+                    wildcard: self
+                        .wildcard
+                        .map(|v| v.into_iter().map(|v| v.value).collect())
+                        .unwrap_or_default(),
+                }
+                .into(),
+            });
+        }
 
-        let map = self.map.clone();
+        // If keys/values are arrays, all corresponding arrays should be the same size.
+        // All values and keys should have the same type.
+        let (first_pat, first_val) = self
+            .map
+            .iter()
+            .next()
+            .expect("at least one key should exist, per guard above");
 
-        let stub = {
-            let mut tuples = Vec::with_capacity(self.map.len());
-            for (value, keys) in self.map {
-                let pat = base::canvas::Pat::from_variants(keys);
-                tuples.push((pat, value));
+        for (k, v) in self.map.iter().skip(1) {
+            if !k.is_compatible_with(first_pat) {
+                return Err(JsError::new("all keys should have the same types"));
             }
-        };
+            if !v.is_same_type(first_val) {
+                return Err(JsError::new("all values should have the same type"));
+            }
+        }
 
-        todo!()
+        let mut entries = Vec::with_capacity(self.map.len());
+        for (k, v) in self.map {
+            let pat = base::canvas::Pat::from_direct_or_variants_array(v);
+            entries.push((pat, k));
+        }
+
+        Ok(JsMapNodeStub {
+            stub: base::canvas::NodeStub::Map {
+                tuples: entries,
+                wildcard: match self.wildcard.map(|v| v.value) {
+                    Some(v) => v,
+                    None => SmallVec::new(),
+                },
+            }
+            .into(),
+        })
     }
 }
 
@@ -770,7 +782,7 @@ impl From<JsDataType> for base::canvas::PrimitiveType {
 }
 
 /// A value as an instance of a data type supported by the canvas.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 #[wasm_bindgen(js_name = Value)]
 pub struct JsDataInstance {
     value: base::canvas::Value,
@@ -902,9 +914,14 @@ pub struct JsResult {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Option)]
 pub struct JsOption {
+    /// The value is always present, even on "None" variant.
+    /// It is not a valid data instance if `isSome` is `false`,
+    /// however this value still can be used to infer the data type, as it is
+    /// guaranteed to be the same as for the value of the `Some` variant.
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub value: JsDataInstance,
 
+    /// Whether the value is present. If this is `false`, the `value` is not a valid data instance.
     #[wasm_bindgen(readonly, js_name = isSome)]
     pub is_some: bool,
 }

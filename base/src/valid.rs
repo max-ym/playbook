@@ -922,9 +922,9 @@ mod tests {
         let b = canvas.add_node(node.clone(), ());
         let c = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge(outpin!(a), inpin!(b)).unwrap();
-        canvas.add_edge(outpin!(b), inpin!(c)).unwrap();
-        canvas.add_edge(outpin!(c), inpin!(a)).unwrap();
+        canvas.add_edge_by_parts(outpin!(a), inpin!(b)).unwrap();
+        canvas.add_edge_by_parts(outpin!(b), inpin!(c)).unwrap();
+        canvas.add_edge_by_parts(outpin!(c), inpin!(a)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();
@@ -950,10 +950,10 @@ mod tests {
         let c = canvas.add_node(node.clone(), ());
         let d = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge(outpin!(a), inpin!(b)).unwrap();
-        canvas.add_edge(outpin!(b), inpin!(c)).unwrap();
-        canvas.add_edge(outpin!(c), inpin!(d)).unwrap();
-        canvas.add_edge(outpin!(d), inpin!(b)).unwrap();
+        canvas.add_edge_by_parts(outpin!(a), inpin!(b)).unwrap();
+        canvas.add_edge_by_parts(outpin!(b), inpin!(c)).unwrap();
+        canvas.add_edge_by_parts(outpin!(c), inpin!(d)).unwrap();
+        canvas.add_edge_by_parts(outpin!(d), inpin!(b)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();
@@ -981,11 +981,11 @@ mod tests {
         let d = canvas.add_node(node.clone(), ());
         let e = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge(outpin!(a), inpin!(b)).unwrap();
-        canvas.add_edge(outpin!(b), inpin!(c)).unwrap();
-        canvas.add_edge(outpin!(c), inpin!(d)).unwrap();
-        canvas.add_edge(outpin!(d), inpin!(b)).unwrap();
-        canvas.add_edge(outpin!(c), inpin!(e)).unwrap();
+        canvas.add_edge_by_parts(outpin!(a), inpin!(b)).unwrap();
+        canvas.add_edge_by_parts(outpin!(b), inpin!(c)).unwrap();
+        canvas.add_edge_by_parts(outpin!(c), inpin!(d)).unwrap();
+        canvas.add_edge_by_parts(outpin!(d), inpin!(b)).unwrap();
+        canvas.add_edge_by_parts(outpin!(c), inpin!(e)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let cycles = validator.detect_cycles();
@@ -1013,13 +1013,13 @@ mod tests {
         let parse1 = canvas.add_node(parse_int_stub, ());
         let order = canvas.add_node(ordering_stub, ());
 
-        canvas.add_edge(outpin!(input0, 1), inpin!(parse0)).unwrap();
-        canvas.add_edge(outpin!(input1, 1), inpin!(parse1)).unwrap();
+        canvas.add_edge_by_parts(outpin!(input0, 1), inpin!(parse0)).unwrap();
+        canvas.add_edge_by_parts(outpin!(input1, 1), inpin!(parse1)).unwrap();
         canvas
-            .add_edge(outpin!(parse0, 1), inpin!(order, 0))
+            .add_edge_by_parts(outpin!(parse0, 1), inpin!(order, 0))
             .unwrap();
         canvas
-            .add_edge(outpin!(parse1, 1), inpin!(order, 1))
+            .add_edge_by_parts(outpin!(parse1, 1), inpin!(order, 1))
             .unwrap();
 
         let mut validator = Validator::new(&canvas);
@@ -1083,8 +1083,8 @@ mod tests {
         let a = canvas.add_node(node.clone(), ());
         let b = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge(outpin!(a, 0), inpin!(b, 1)).unwrap();
-        canvas.add_edge(outpin!(b, 0), inpin!(a, 1)).unwrap();
+        canvas.add_edge_by_parts(outpin!(a, 0), inpin!(b, 1)).unwrap();
+        canvas.add_edge_by_parts(outpin!(b, 0), inpin!(a, 1)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let invalid_pin_nodes = validator.invalid_pin_nodes();
@@ -1108,8 +1108,8 @@ mod tests {
         let a = canvas.add_node(node.clone(), ());
         let b = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge(outpin!(a, 1), inpin!(b, 2)).unwrap();
-        canvas.add_edge(outpin!(a, 1), inpin!(b, 0)).unwrap();
+        canvas.add_edge_by_parts(outpin!(a, 1), inpin!(b, 2)).unwrap();
+        canvas.add_edge_by_parts(outpin!(a, 1), inpin!(b, 0)).unwrap();
 
         let mut validator = Validator::new(&canvas);
         let invalid_pin_nodes = validator.invalid_pin_nodes();

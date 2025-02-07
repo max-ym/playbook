@@ -1,7 +1,7 @@
 use std::sync::{OnceLock, RwLock};
 use std::time::UNIX_EPOCH;
 
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use uuid::Uuid;
 
 use crate::project::Project;
@@ -9,10 +9,13 @@ use crate::*;
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
+/// Access current work session lock.
 pub fn work_session() -> &'static RwLock<WorkSession> {
     WORK_SESSION.get_or_init(|| RwLock::new(WorkSession::new()))
 }
 
+/// Work session that contains all the projects and their history loaded into the
+/// application. This is a singleton object.
 pub struct WorkSession {
     /// Loaded projects.
     projects: SmallVec<[WorkSessionProject; 1]>,
@@ -20,11 +23,18 @@ pub struct WorkSession {
     /// Index of the current project in the `projects` vector.
     current_project_idx: usize,
 
+    /// Function to call to notify when the state of the work session changes.
     on_state_change: Option<js_sys::Function>,
 }
 
 unsafe impl Send for WorkSession {}
 unsafe impl Sync for WorkSession {}
+
+impl std::default::Default for WorkSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl WorkSession {
     pub fn new() -> Self {
@@ -35,10 +45,14 @@ impl WorkSession {
         }
     }
 
+    /// Convert UUID of the project into the index. Return [None] if the project is
+    /// not loaded into the work session.
     fn project_idx(&self, uuid: Uuid) -> Option<usize> {
         self.projects.iter().position(|p| p.project.uuid() == uuid)
     }
 
+    /// Access the project by its UUID. Returns [None] if the project is not loaded
+    /// into the work session.
     pub fn project_by_id_mut(&mut self, uuid: Uuid) -> Option<&mut crate::project::Project> {
         self.projects
             .iter_mut()
@@ -46,6 +60,8 @@ impl WorkSession {
             .map(|p| &mut p.project)
     }
 
+    /// Access the project by its UUID. Returns [None] if the project is not loaded
+    /// into the work session.
     pub fn project_by_id(&self, uuid: Uuid) -> Option<&crate::project::Project> {
         self.projects
             .iter()
@@ -53,6 +69,7 @@ impl WorkSession {
             .map(|p| &p.project)
     }
 
+    /// The currently active project in the work session. Returns [None] if there are no projects.
     pub fn current_project(&self) -> Option<&WorkSessionProject> {
         if self.projects.is_empty() {
             None
@@ -61,6 +78,7 @@ impl WorkSession {
         }
     }
 
+    /// The currently active project in the work session. Returns [None] if there are no projects.
     pub fn current_project_mut(&mut self) -> Option<&mut WorkSessionProject> {
         if self.projects.is_empty() {
             None
@@ -68,10 +86,24 @@ impl WorkSession {
             Some(&mut self.projects[self.current_project_idx])
         }
     }
+
+    /// Switch the current project to another one loaded into the work session.
+    pub fn switch_current_project(&mut self, project: Uuid) -> Result<(), ProjectNotFoundError> {
+        let idx = self.project_idx(project).ok_or(ProjectNotFoundError)?;
+        self.current_project_idx = idx;
+        Ok(())
+    }
 }
 
+#[derive(Debug)]
+pub struct ProjectNotFoundError;
+
+/// A project in the work session. This contains the project data and the history stack of changes.
 pub struct WorkSessionProject {
+    /// The project data.
     project: Project,
+
+    /// History stack of changes made to the project.
     changes: ChangeStack,
 }
 
@@ -98,10 +130,12 @@ impl WorkSessionProject {
         todo!()
     }
 
+    /// Get the change at a specific position in the history stack.
     pub fn change_at(&self, pos: usize) -> Option<&ChangeItem> {
         self.changes.stack.get(pos)
     }
 
+    /// Get the UUID of the project.
     pub fn uuid(&self) -> Uuid {
         self.project.uuid()
     }
@@ -139,16 +173,15 @@ impl JsWorkSession {
     #[wasm_bindgen(js_name = switchCurrentProject)]
     pub fn switch_current_project(&self, project: project::JsProject) -> Result<(), JsError> {
         let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
-        let idx = ws.project_idx(project.uuid).ok_or(JsError::new("Project not found"))?;
-        ws.current_project_idx = idx;
-        Ok(())
+        ws.switch_current_project(project.uuid)
+            .map_err(|_| JsError::new("Project not found"))
     }
 
     /// Check whether all current changes (as a draft) are synchronized with the server.
     /// This is useful when the user has sudden power loss, network disconnect, browser
     /// crash, for the changes to remain recoverable.
     /// True means all data is saved on the server, false means there are unsaved changes.
-    /// 
+    ///
     /// # Fake Server
     /// In the fake server mode, this always returns false. This aligns with the
     /// `saveToServer` always throwing an error in the fake server mode.
@@ -164,17 +197,19 @@ impl JsWorkSession {
     /// Force save all current changes to the server.
     /// This is useful when the user wants to make sure that all changes are saved e.g. when
     /// closing the browser tab.
-    /// 
+    ///
     /// # Errors
     /// This will throw an error if the server is not reachable,
     /// or if the user is not authenticated.
-    /// 
+    ///
     /// # Fake Server
     /// In the fake server mode, this will throw an error.
     #[wasm_bindgen(js_name = saveToServer)]
     pub async fn save_to_server(&self) -> Result<(), JsError> {
         if cfg!(feature = "fake_server") {
-            return Err(JsError::new("Fake server mode throws an error on save attempt"));
+            return Err(JsError::new(
+                "Fake server mode throws an error on save attempt",
+            ));
         }
 
         todo!()
@@ -185,7 +220,8 @@ impl JsWorkSession {
     /// background downloads, etc.
     #[wasm_bindgen(setter, js_name = onStateChange)]
     pub fn set_on_state_change(&mut self, f: js_sys::Function) {
-        todo!()
+        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        ws.on_state_change = Some(f);
     }
 }
 
@@ -226,7 +262,7 @@ impl JsHistory {
         })
     }
 
-    /// Go to a specific change in the current project. 
+    /// Go to a specific change in the current project.
     /// Where 0 is the first change after the initial state.
     /// Returns the position starting from which the changes were undone or redone (position before
     /// the change). If the passed position is out of bounds, this is no-op and returns `undefined`.
@@ -309,7 +345,11 @@ pub struct JsWorkSessionUninitError {
 
 /// Stack of changes made to a project. This allows to undo and redo changes.
 pub struct ChangeStack {
+    /// Stack of changes made to the project.
     stack: Vec<ChangeItem>,
+
+    /// Current position in the history stack, that is reflected on the canvas
+    /// of the project and, consequently, in the UI.
     pos: usize,
 }
 
@@ -330,8 +370,222 @@ pub struct ChangeItem {
 impl ChangeItem {
     /// Get the timestamp of the change in microseconds since UNIX epoch.
     pub fn micros_since_unix(&self) -> u128 {
-        self.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default().as_micros()
+        self.timestamp
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
     }
 }
 
-pub enum ChangeOp {}
+/// Change operation that can be performed on the project. This
+/// information is enough to reflect the change in the UI.
+/// This allows as well to revert the existing change.
+#[derive(Debug, Clone)]
+pub enum ChangeOp {
+    /// Add a node to the canvas.
+    AddNode {
+        stub: Box<base::canvas::NodeStub>,
+        meta: serde_json::Value,
+        id: base::canvas::Id,
+    },
+
+    /// Remove a node from the canvas.
+    RemoveNode {
+        removed_edges: Vec<base::canvas::Edge>,
+        stub: Box<base::canvas::NodeStub>,
+        meta: serde_json::Value,
+        id: base::canvas::Id,
+    },
+
+    /// Add an edge to the canvas.
+    AddEdge { edge: base::canvas::Edge },
+
+    /// Remove an edge from the canvas.
+    RemoveEdge { edge: base::canvas::Edge },
+
+    /// Alter metadata of a node.
+    AlterNodeMetadata {
+        /// Node in which the metadata was changed.
+        node_id: base::canvas::Id,
+
+        /// Values added to the metadata.
+        ///
+        /// For edits, the value is the new value.
+        ///
+        /// If no additonal values were added, this should be `null`.
+        add: serde_json::Value,
+
+        /// Values removed from the metadata.
+        ///
+        /// For edits, the value is the old value and is also thus present in `add` field.
+        ///
+        /// If no values were removed, this should be `null`.
+        remove: serde_json::Value,
+    },
+}
+
+impl ChangeOp {
+    /// Convert given operation into corresponding reverting operation(s).
+    pub fn into_inverted(self) -> SmallVec<[ChangeOp; 1]> {
+        use ChangeOp::*;
+        match self {
+            AddNode { stub, id, meta } => {
+                let op = RemoveNode {
+                    removed_edges: Vec::new(),
+                    stub,
+                    meta,
+                    id,
+                };
+                smallvec![op]
+            }
+            RemoveNode {
+                removed_edges,
+                meta,
+                stub,
+                id,
+            } => {
+                let mut vec = SmallVec::with_capacity(removed_edges.len() + 1);
+                vec.push(AddNode { stub, meta, id });
+                for edge in removed_edges {
+                    vec.push(AddEdge { edge });
+                }
+                vec
+            }
+            AddEdge { edge } => {
+                smallvec![RemoveEdge { edge }]
+            }
+            RemoveEdge { edge } => {
+                smallvec![AddEdge { edge }]
+            }
+            AlterNodeMetadata {
+                node_id,
+                add,
+                remove,
+            } => {
+                smallvec![AlterNodeMetadata {
+                    node_id,
+                    add: remove,
+                    remove: add,
+                }]
+            }
+        }
+    }
+
+    /// Apply the change operation to the project, returning the resulting actual
+    /// operation. Note that the operation can be different (with different params)
+    /// than the original one, e.g. ID of the new node can change.
+    pub fn apply(self, project: &mut WorkSessionProject) -> ChangeOp {
+        use ChangeOp::*;
+
+        const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
+        const EXPECT_FOUND_EDGE: &str = "edge not found, though operation was recorded";
+
+        match self {
+            AddNode { stub, id: _, meta } => {
+                let new_id = project
+                    .project
+                    .canvas_mut()
+                    .add_node(stub.as_ref().clone(), meta.clone());
+                AddNode {
+                    stub,
+                    meta,
+                    id: new_id,
+                }
+            }
+            RemoveNode {
+                mut removed_edges,
+                meta: _,
+                mut stub,
+                id,
+            } => {
+                debug_assert!(
+                    removed_edges.is_empty(),
+                    "edges are filled in here, not expecting any"
+                );
+
+                let cnt = project
+                    .project
+                    .canvas()
+                    .node_edge_io_iter(id)
+                    .expect(EXPECT_FOUND_NODE)
+                    .count();
+                removed_edges.reserve(cnt);
+                for edge in project
+                    .project
+                    .canvas()
+                    .node_edge_io_iter(id)
+                    .expect(EXPECT_FOUND_NODE)
+                {
+                    removed_edges.push(edge);
+                }
+
+                let node = project
+                    .project
+                    .canvas_mut()
+                    .remove_node(id)
+                    .expect(EXPECT_FOUND_NODE);
+
+                // Reuse existing "Box", but we don't care about that dummy input stub.
+                *stub = node.stub;
+
+                RemoveNode {
+                    removed_edges,
+                    stub,
+                    meta: node.meta,
+                    id,
+                }
+            }
+            AddEdge { edge } => {
+                project
+                    .project
+                    .canvas_mut()
+                    .add_edge(edge)
+                    .expect(EXPECT_FOUND_EDGE);
+                AddEdge { edge }
+            }
+            RemoveEdge { edge } => {
+                project
+                    .project
+                    .canvas_mut()
+                    .remove_edge(edge)
+                    .expect(EXPECT_FOUND_EDGE);
+                RemoveEdge { edge }
+            }
+            AlterNodeMetadata {
+                node_id,
+                add,
+                remove,
+            } => {
+                let canvas = project.project.canvas_mut();
+                let node = canvas.node_mut(node_id).expect(EXPECT_FOUND_NODE);
+                json_patch::merge(&mut node.meta, &remove);
+                json_patch::merge(&mut node.meta, &add);
+
+                AlterNodeMetadata {
+                    node_id,
+                    add,
+                    remove,
+                }
+            }
+        }
+    }
+
+    /// Apply all change operations in the iterator to the project.
+    pub fn apply_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
+        for op in iter {
+            op.apply(project);
+        }
+    }
+
+    /// Revert the change operation from the project.
+    pub fn revert(self, project: &mut WorkSessionProject) {
+        Self::apply_all(self.into_inverted(), project);
+    }
+
+    /// Revert all change operations in the iterator from the project.
+    pub fn revert_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
+        for op in iter {
+            op.revert(project);
+        }
+    }
+}

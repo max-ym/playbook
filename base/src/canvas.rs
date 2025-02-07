@@ -59,8 +59,85 @@ impl<NodeMeta> Canvas<NodeMeta> {
         id
     }
 
-    pub fn get_node(&self, id: Id) -> Option<&Node<NodeMeta>> {
+    pub fn node(&self, id: Id) -> Option<&Node<NodeMeta>> {
         self.node_id_to_idx(id).map(|idx| &self.nodes[idx as usize])
+    }
+
+    pub fn node_mut(&mut self, id: Id) -> Option<&mut Node<NodeMeta>> {
+        self.node_id_to_idx(id)
+            .map(move |idx| &mut self.nodes[idx as usize])
+    }
+
+    fn node_edge_io_slices(&self, node_id: Id) -> Option<(&[EdgeInner], &[EdgeInner])> {
+        let idx = self.node_id_to_idx(node_id)?;
+        let slice_out = {
+            let start_edge_out = EdgeInner {
+                from: (idx, 0),
+                to: (0, 0),
+            };
+            let end_edge_out = EdgeInner {
+                from: (idx + 1, 0),
+                to: (0, 0),
+            };
+
+            let start = match self.edges.binary_search(&start_edge_out) {
+                Ok(idx) => idx,
+                Err(idx) => idx,
+            };
+            let end = match self.edges.binary_search(&end_edge_out) {
+                Ok(idx) => idx,
+                Err(idx) => idx,
+            };
+            &self.edges[start..end]
+        };
+
+        let slice_in = {
+            let start_edge_in = EdgeInner {
+                from: (0, 0),
+                to: (idx, 0),
+            };
+            let end_edge_in = EdgeInner {
+                from: (0, 0),
+                to: (idx + 1, 0),
+            };
+
+            let start = match self.edges.binary_search(&start_edge_in) {
+                Ok(idx) => idx,
+                Err(idx) => idx,
+            };
+            let end = match self.edges.binary_search(&end_edge_in) {
+                Ok(idx) => idx,
+                Err(idx) => idx,
+            };
+            &self.edges[start..end]
+        };
+
+        if cfg!(debug_assertions) {
+            for e in slice_out {
+                debug_assert_eq!(e.from.0, idx);
+            }
+            for e in slice_in {
+                debug_assert_eq!(e.to.0, idx);
+            }
+        }
+
+        Some((slice_in, slice_out))
+    }
+
+    /// Iterator over all edges connected to the node.
+    /// Returns [None] if the node does not exist.
+    pub fn node_edge_io_iter(&self, node_id: Id) -> Option<impl Iterator<Item = Edge> + '_> {
+        let (slice_in, slice_out) = self.node_edge_io_slices(node_id)?;
+        Some(slice_in.iter().chain(slice_out.iter()).map(move |e| Edge {
+            from: OutputPin(Pin {
+                node_id: self.nodes[e.from.0 as usize].id,
+                order: e.from.1,
+            }),
+            to: InputPin(Pin {
+                node_id: self.nodes[e.to.0 as usize].id,
+                order: e.to.1,
+            }),
+        }))
     }
 
     pub(crate) fn node_id_to_idx(&self, id: Id) -> Option<NodeIdx> {
@@ -119,11 +196,11 @@ impl<NodeMeta> Canvas<NodeMeta> {
     /// validation/resolution step.
     // NOTE: insertion performance is low for old nodes due to inserts onto the array beginning.
     // Consider optimizing this if it becomes a bottleneck.
-    pub fn add_edge(
+    pub fn add_edge_by_parts(
         &mut self,
         from: OutputPin,
         to: InputPin,
-    ) -> Result<EdgeIdx, NodeNotFoundError> {
+    ) -> Result<(), NodeNotFoundError> {
         let from_idx = self
             .node_id_to_idx(from.node_id)
             .ok_or(NodeNotFoundError(from.node_id))?;
@@ -136,17 +213,36 @@ impl<NodeMeta> Canvas<NodeMeta> {
             to: (to_idx, to.order),
         };
 
-        let idx = match self.edges.binary_search(&edge) {
-            Ok(idx) => idx,
-            Err(idx) => {
-                self.edges.insert(idx, edge);
-                idx
-            }
+        if let Err(idx) = self.edges.binary_search(&edge) {
+            self.edges.insert(idx, edge);
         };
 
         self.unroot_node(to_idx);
 
-        Ok(idx as EdgeIdx)
+        Ok(())
+    }
+
+    /// See [Canvas::add_edge_by_parts].
+    pub fn add_edge(&mut self, edge: Edge) -> Result<(), NodeNotFoundError> {
+        self.add_edge_by_parts(edge.from, edge.to)
+    }
+
+    /// Remove the edge from the canvas.
+    pub fn remove_edge(&mut self, edge: Edge) -> Result<(), EdgeNotFoundError> {
+        let edge_inner = EdgeInner {
+            from: (
+                self.node_id_to_idx(edge.from.node_id).unwrap(),
+                edge.from.order,
+            ),
+            to: (self.node_id_to_idx(edge.to.node_id).unwrap(), edge.to.order),
+        };
+
+        if let Some(idx) = self.edges.iter().position(|e| *e == edge_inner) {
+            self.edges.remove(idx);
+            Ok(())
+        } else {
+            Err(EdgeNotFoundError(edge))
+        }
     }
 
     /// Remove the root node from the list of root nodes, if it is present.
@@ -159,6 +255,9 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
 #[derive(Debug)]
 pub struct NodeNotFoundError(pub Id);
+
+#[derive(Debug)]
+pub struct EdgeNotFoundError(pub Edge);
 
 #[derive(Debug)]
 pub struct Node<Meta> {
@@ -1029,7 +1128,7 @@ pub enum PinResolutionError {
 }
 
 /// Pattern for matching values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Pat {
     // Currently we support only "or" patterns or plain values.
     values: SmallVec<[Value; 1]>,
@@ -1040,13 +1139,36 @@ impl Pat {
         Self { values: variants }
     }
 
+    pub fn from_inner_variants_array(variants: Value) -> Result<Self, Value> {
+        match variants {
+            Value::Array(v) => Ok(Self::from_variants(v.into())),
+            v => Err(v),
+        }
+    }
+
+    pub fn from_direct_or_variants_array(variants: Value) -> Self {
+        match Self::from_inner_variants_array(variants) {
+            Ok(v) => v,
+            Err(v) => Self::from_variants(smallvec::smallvec![v])
+        }
+    }
+
     /// Get the variants of the pattern, if it is an "or" pattern.
     pub fn as_variants(&self) -> Option<&[Value]> {
         Some(&self.values)
     }
+
+    /// Whether these two patterns can be inside the same pattern list.
+    /// Basically, this checks type compatibility.
+    pub fn is_compatible_with(&self, other: &Self) -> bool {
+        self.values
+            .iter()
+            .zip(other.values.iter())
+            .all(|(a, b)| a.type_of() == b.type_of())
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Value {
     Int(i64),
     Uint(u64),
@@ -1092,9 +1214,22 @@ impl Value {
             Option { value, .. } => PrimitiveType::Option(Box::new(value.type_of())),
         }
     }
+
+    /// Get the length of the array, if this value is an array.
+    pub fn array_length(&self) -> Option<usize> {
+        match self {
+            Value::Array(v) => Some(v.len()),
+            _ => None,
+        }
+    }
+
+    /// Whether this value has the same type as the other value.
+    pub fn is_same_type(&self, other: &Self) -> bool {
+        self.type_of() == other.type_of()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PrimitiveType {
     Int,
     Uint,
@@ -1168,7 +1303,7 @@ impl From<PrimitiveTypeConst> for PrimitiveType {
 ///
 /// External projects are qualified if they have at least one pin for the node
 /// they will be represented with. They themselves, as functions, should be pure and deterministic.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Predicate {
     pub inputs: SmallVec<[PrimitiveType; 1]>,
     pub outputs: SmallVec<[PrimitiveType; 1]>,
@@ -1267,11 +1402,11 @@ mod test {
             order: 0,
         });
 
-        let ab = canvas.add_edge(outa, inpb).unwrap();
+        let ab = canvas.add_edge_by_parts(outa, inpb).unwrap();
         let ab = canvas.get_edge(ab).unwrap();
-        let bc = canvas.add_edge(outb, inpc).unwrap();
+        let bc = canvas.add_edge_by_parts(outb, inpc).unwrap();
         let bc = canvas.get_edge(bc).unwrap();
-        let ca = canvas.add_edge(outc, inpa).unwrap();
+        let ca = canvas.add_edge_by_parts(outc, inpa).unwrap();
         let ca = canvas.get_edge(ca).unwrap();
 
         assert_eq!(ab.from, outa);
