@@ -629,14 +629,16 @@ impl NodeStub {
         Some(some)
     }
 
-    pub const fn static_total_pin_count(&self) -> Option<usize> {
+    pub const fn static_total_pin_count(&self) -> Option<PinOrder> {
         match (self.static_inputs(), self.static_outputs()) {
-            (Some(inputs), Some(outputs)) => Some(inputs.len() + outputs.len()),
+            (Some(inputs), Some(outputs)) => {
+                Some(inputs.len() as PinOrder + outputs.len() as PinOrder)
+            }
             _ => None,
         }
     }
 
-    pub fn total_pin_count(&self) -> usize {
+    pub fn total_pin_count(&self) -> PinOrder {
         if let Some(v) = self.static_total_pin_count() {
             return v;
         }
@@ -644,44 +646,86 @@ impl NodeStub {
         self.input_pin_count() + self.output_pin_count()
     }
 
-    pub fn output_pin_count(&self) -> usize {
+    pub fn output_pin_count(&self) -> PinOrder {
         if let Some(v) = self.static_outputs() {
-            return v.len();
+            return v.len() as PinOrder;
         }
 
         use NodeStub::*;
         match self {
             Comment { .. } | Todo { .. } => self.input_pin_count(),
             Func(predicate) => predicate.output_pin_count(),
-            Match { values, .. } => values.len(),
+            Match { values, .. } => values.len() as PinOrder,
             List { .. } => self.input_pin_count(),
-            IfElse { inputs, .. } => *inputs as usize,
-            Regex(regex) => regex.captures_len(),
-            Map { tuples, .. } => tuples[0].1.len(),
+            IfElse { inputs, .. } => *inputs,
+            Regex(regex) => regex.captures_len() as PinOrder,
+            Map { tuples, .. } => tuples[0].1.len() as PinOrder,
             _ => unreachable!("total_pin_count should be implemented for {self:?}"),
         }
     }
 
-    pub fn input_pin_count(&self) -> usize {
+    pub fn input_pin_count(&self) -> PinOrder {
         if let Some(v) = self.static_inputs() {
-            return v.len();
+            return v.len() as PinOrder;
         }
 
         use NodeStub::*;
         match self {
-            Comment { inputs, .. } | Todo { inputs, .. } => *inputs as usize,
-            Func(predicate) => predicate.inputs.len(),
-            Match { inputs, .. } => *inputs as usize,
-            List { values } => values[0].len(),
-            IfElse { inputs, condition } => condition.inputs.len() + *inputs as usize,
-            Map { tuples, .. } => tuples.len(),
+            Comment { inputs, .. } | Todo { inputs, .. } => *inputs,
+            Func(predicate) => predicate.inputs.len() as PinOrder,
+            Match { inputs, .. } => *inputs,
+            List { values } => values[0].len() as PinOrder,
+            IfElse { inputs, condition } => condition.inputs.len() as PinOrder + *inputs,
+            Map { tuples, .. } => tuples.len() as PinOrder,
             _ => unreachable!("input_pin_count should be implemented for {self:?}"),
         }
     }
 
     /// Index at which the output pins start counting.
-    pub fn output_pin_start_idx(&self) -> usize {
+    pub fn output_pin_start_idx(&self) -> PinOrder {
         self.input_pin_count()
+    }
+
+    /// Calculate the real pin index in the array of all pins in the
+    /// node for the given output pin index. This function accounts
+    /// for correct offset of the pins to produce the correct index
+    /// to use to refer to this pin.
+    ///
+    /// # Safety
+    /// This does not check whether this pin actually exists, and if it does not
+    /// it may overlap with other pins or cause other undefined behavior.
+    pub unsafe fn real_output_pin_idx_unchecked(&self, idx: PinOrder) -> PinOrder {
+        idx as PinOrder + self.output_pin_start_idx()
+    }
+
+    /// See [Self::real_output_pin_idx_unchecked], but this returns [None] on invalid index.
+    pub fn real_output_pin_idx(&self, idx: PinOrder) -> Option<PinOrder> {
+        if idx >= self.output_pin_start_idx() + self.output_pin_count() {
+            None
+        } else {
+            Some(unsafe { self.real_output_pin_idx_unchecked(idx) })
+        }
+    }
+
+    /// Calculate the real pin index in the array of all pins in the
+    /// node for the given input pin index. This function accounts
+    /// for correct offset of the pins to produce the correct index
+    /// to use to refer to this pin.
+    ///
+    /// # Safety
+    /// This does not check whether this pin actually exists, and if it does not
+    /// it may overlap with other pins or cause other undefined behavior.
+    pub unsafe fn real_input_pin_idx_unchecked(&self, idx: PinOrder) -> PinOrder {
+        idx as PinOrder
+    }
+
+    /// See [Self::real_input_pin_idx_unchecked], but this returns [None] on invalid index.
+    pub fn real_input_pin_idx(&self, idx: PinOrder) -> Option<PinOrder> {
+        if idx >= self.input_pin_count() {
+            None
+        } else {
+            Some(unsafe { self.real_input_pin_idx_unchecked(idx) })
+        }
     }
 
     /// Whether the node can be used as a starting point of a flow.
@@ -720,7 +764,7 @@ impl<'pins> ResolvePinTypes<'pins> {
         &'a mut [Option<PrimitiveType>],
         &'a mut [Option<PrimitiveType>],
     ) {
-        let (inputs, outputs) = pins.split_at_mut(node.input_pin_count());
+        let (inputs, outputs) = pins.split_at_mut(node.input_pin_count() as usize);
         (inputs, outputs)
     }
 
@@ -742,7 +786,7 @@ impl<'pins> ResolvePinTypes<'pins> {
         pins: &'pins mut Vec<Option<PrimitiveType>>,
         expect_progress_or_complete: bool,
     ) -> Result<Self, PinResolutionError> {
-        if pins.len() != node.total_pin_count() {
+        if pins.len() as PinOrder != node.total_pin_count() {
             return Err(PinResolutionError::PinNumberMismatch);
         }
 
@@ -802,7 +846,7 @@ impl<'pins> ResolvePinTypes<'pins> {
                         // Otherwise, each of that group is symmetric to input pins, except for
                         // the first ones that go to the condition predicate.
 
-                        let after_predicate_idx = condition.input_pin_count();
+                        let after_predicate_idx = condition.input_pin_count() as usize;
                         let branch_size = *inputs as usize;
                         let (predicate_pins, rest) = pins.split_at_mut(after_predicate_idx);
                         let (input_pins, rest) = rest.split_at_mut(branch_size);
@@ -842,10 +886,7 @@ impl<'pins> ResolvePinTypes<'pins> {
 
                         Self { pins, is_progress }
                     }
-                    _ => Self {
-                        pins,
-                        is_progress,
-                    },
+                    _ => Self { pins, is_progress },
                 }
             }
         };
@@ -871,7 +912,7 @@ impl<'pins> ResolvePinTypes<'pins> {
 
         trace!("static inputs prefill");
         if let Some(static_inputs) = node.static_inputs() {
-            debug_assert_eq!(static_inputs.len(), output_idx);
+            debug_assert_eq!(static_inputs.len(), output_idx as usize);
             for (i, t) in static_inputs.iter().copied().enumerate() {
                 if let Some(t) = t.map(Into::into) {
                     if pins[i].is_none() {
@@ -888,7 +929,7 @@ impl<'pins> ResolvePinTypes<'pins> {
         trace!("static outputs prefill");
         if let Some(static_outputs) = node.static_outputs() {
             for (i, t) in static_outputs.iter().copied().enumerate() {
-                let i = i + output_idx;
+                let i = i + output_idx as usize;
                 if let Some(t) = t.map(Into::into) {
                     if pins[i].is_none() {
                         trace!("prefill output pin {i} with {t:?}");
@@ -1148,16 +1189,16 @@ pub struct Predicate {
 }
 
 impl Predicate {
-    pub fn total_pin_count(&self) -> usize {
+    pub fn total_pin_count(&self) -> PinOrder {
         self.input_pin_count() + self.output_pin_count()
     }
 
-    pub fn input_pin_count(&self) -> usize {
-        self.inputs.len()
+    pub fn input_pin_count(&self) -> PinOrder {
+        self.inputs.len() as PinOrder
     }
 
-    pub fn output_pin_count(&self) -> usize {
-        self.outputs.len()
+    pub fn output_pin_count(&self) -> PinOrder {
+        self.outputs.len() as PinOrder
     }
 }
 
