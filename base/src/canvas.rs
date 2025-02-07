@@ -761,6 +761,15 @@ impl NodeStub {
         self.input_pin_count()
     }
 
+    pub fn is_valid_output_ordinal(&self, ordinal: PinOrder) -> bool {
+        ordinal < (self.output_pin_start_idx() + self.output_pin_count())
+            && ordinal >= self.output_pin_start_idx()
+    }
+
+    pub fn is_valid_input_ordinal(&self, ordinal: PinOrder) -> bool {
+        ordinal < self.input_pin_count()
+    }
+
     /// Calculate the real pin index in the array of all pins in the
     /// node for the given output pin index. This function accounts
     /// for correct offset of the pins to produce the correct index

@@ -2,14 +2,13 @@ use std::collections::HashMap;
 
 use base::table_data;
 use chrono::Datelike;
-use compact_str::CompactString;
 use js_sys::{RegExp, Uint8Array};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
 use serde_json::Value as JsonValue;
 
-use crate::*;
+use crate::{work_session::work_session, *};
 
 pub struct Project {
     name: JsString,
@@ -581,15 +580,44 @@ pub struct JsNode {
 #[wasm_bindgen(js_class = Node)]
 impl JsNode {
     /// Get the stub that will allow to create a new node with the same configuration.
+    ///
+    /// # Errors
+    /// If the project or the node is no longer valid, this will return an error.
     #[wasm_bindgen(js_name = stub)]
-    pub fn stub(&self) -> JsNodeStub {
-        todo!()
+    pub fn stub(&self) -> Result<JsNodeStub, JsError> {
+        let ws = work_session().read().unwrap();
+        let maybe_project = ws.project_by_id(self.project_uuid);
+        if let Some(project) = maybe_project {
+            if let Some(node) = project.canvas().node(self.node_id) {
+                Ok(node.stub.clone().into())
+            } else {
+                Err(JsError::new("Node not found"))
+            }
+        } else {
+            Err(JsError::new("Project not found"))
+        }
     }
 
     /// Get the output pin at the given position.
     #[wasm_bindgen(js_name = outAt)]
-    pub fn out_at(&self, position: u32) -> Option<JsNodePin> {
-        todo!()
+    pub fn out_at(&self, position: u32) -> Result<JsNodePin, JsError> {
+        let ws = work_session().read().unwrap();
+        let project = ws
+            .project_by_id(self.project_uuid)
+            .ok_or_else(|| JsError::new("Project not found"))?;
+        let node = project
+            .canvas()
+            .node(self.node_id)
+            .ok_or_else(|| JsError::new("Node not found"))?;
+        if let Some(ordinal) = node.stub.real_output_pin_idx(position as _) {
+            Ok(JsNodePin {
+                project_uuid: self.project_uuid,
+                node_id: self.node_id,
+                ordinal: ordinal as _,
+            })
+        } else {
+            Err(JsError::new("Output pin not found"))
+        }
     }
 
     /// Get the input pin at the given position.
@@ -634,7 +662,6 @@ pub struct JsNodePin {
     project_uuid: Uuid,
     node_id: base::canvas::Id,
     ordinal: u32,
-    is_output: bool,
 }
 
 #[wasm_bindgen(js_class = NodePin)]
@@ -652,7 +679,7 @@ impl JsNodePin {
     /// Whether the pin is an output pin (`true`). If it is an input pin, this returns `false`.
     #[wasm_bindgen(getter, js_name = isOutput)]
     pub fn is_output(&self) -> bool {
-        self.is_output
+        todo!()
     }
 
     /// Whether the pin accepts optional values.
