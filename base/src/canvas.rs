@@ -1030,7 +1030,21 @@ pub enum PinResolutionError {
 
 /// Pattern for matching values.
 #[derive(Debug, Clone)]
-pub struct Pat {}
+pub struct Pat {
+    // Currently we support only "or" patterns or plain values.
+    values: SmallVec<[Value; 1]>,
+}
+
+impl Pat {
+    pub fn from_variants(variants: SmallVec<[Value; 1]>) -> Self {
+        Self { values: variants }
+    }
+
+    /// Get the variants of the pattern, if it is an "or" pattern.
+    pub fn as_variants(&self) -> Option<&[Value]> {
+        Some(&self.values)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Value {

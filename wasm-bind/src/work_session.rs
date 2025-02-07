@@ -148,16 +148,35 @@ impl JsWorkSession {
     /// This is useful when the user has sudden power loss, network disconnect, browser
     /// crash, for the changes to remain recoverable.
     /// True means all data is saved on the server, false means there are unsaved changes.
+    /// 
+    /// # Fake Server
+    /// In the fake server mode, this always returns false. This aligns with the
+    /// `saveToServer` always throwing an error in the fake server mode.
     #[wasm_bindgen(getter, js_name = isServerSaved)]
     pub fn is_server_saved() -> bool {
+        if cfg!(feature = "fake_server") {
+            return false;
+        }
+
         todo!()
     }
 
     /// Force save all current changes to the server.
     /// This is useful when the user wants to make sure that all changes are saved e.g. when
     /// closing the browser tab.
+    /// 
+    /// # Errors
+    /// This will throw an error if the server is not reachable,
+    /// or if the user is not authenticated.
+    /// 
+    /// # Fake Server
+    /// In the fake server mode, this will throw an error.
     #[wasm_bindgen(js_name = saveToServer)]
     pub async fn save_to_server(&self) -> Result<(), JsError> {
+        if cfg!(feature = "fake_server") {
+            return Err(JsError::new("Fake server mode throws an error on save attempt"));
+        }
+
         todo!()
     }
 

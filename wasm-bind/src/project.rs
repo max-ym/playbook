@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use base::table_data;
-use js_sys::Uint8Array;
+use chrono::Datelike;
+use compact_str::CompactString;
+use js_sys::{RegExp, Uint8Array};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
@@ -8,7 +12,7 @@ use serde_json::Value as JsonValue;
 use crate::*;
 
 pub struct Project {
-    name: InterString,
+    name: JsString,
     canvas: base::canvas::Canvas<JsonValue>,
     data: SmallVec<[table_data::Table; 1]>,
     files: SmallVec<[File; 1]>,
@@ -16,7 +20,7 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn name(&self) -> &InterString {
+    pub fn name(&self) -> &JsString {
         &self.name
     }
 
@@ -89,7 +93,7 @@ impl JsProject {
             .files()
             .iter()
             .map(|file| JsProjectFile {
-                name: file.name().to_js(),
+                name: file.name().clone(),
                 uuid: file.uuid().into_js_array(),
                 project_uuid: Some(project.uuid()),
                 is_loaded: file.bytes().is_some(),
@@ -104,7 +108,7 @@ impl JsProject {
     pub fn get_name(&self) -> JsString {
         let ws = work_session::work_session().read().unwrap();
         let project = ws.project_by_id(self.uuid).unwrap();
-        project.name().to_js()
+        project.name().clone()
     }
 
     /// Set the new name for the project.
@@ -112,14 +116,33 @@ impl JsProject {
     pub fn set_name(&mut self, name: JsString) {
         let mut ws = work_session::work_session().write().unwrap();
         let project = ws.project_by_id_mut(self.uuid).unwrap();
-        project.name.set_js(name);
+        project.name = name;
     }
 
     /// Load the project with the given identifier, as returned by listing request.
-    /// 
+    ///
     /// This will throw ProjectLoadError if the project cannot be loaded.
+    ///
+    /// # Fake Server
+    /// Returns a project handle for this identifier if such project exists
+    /// in the work session already.
     pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
-        todo!()
+        if cfg!(feature = "fake_server") {
+            let ws = work_session::work_session();
+            let mut ws = ws.write().unwrap();
+            let uuid = Uuid::parse_str(&String::from(identifier))
+                .map_err(|_| ProjectLoadError::NotFound)?;
+            let project = ws.project_by_id_mut(uuid);
+            if let Some(project) = project {
+                Ok(JsProject {
+                    uuid: project.uuid(),
+                })
+            } else {
+                Err(ProjectLoadError::NotFound)
+            }
+        } else {
+            todo!()
+        }
     }
 
     /// Canvas of the project. This is where the nodes are placed.
@@ -171,9 +194,369 @@ impl JsCanvas {
 
 /// Stub for a node. This is a configuration that allows to create a node in the canvas.
 /// The same stub can be reused to effectively clone the node.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[wasm_bindgen(js_name = NodeStub)]
-pub struct JsNodeStub {}
+pub struct JsNodeStub {
+    stub: base::canvas::NodeStub,
+}
+
+impl From<base::canvas::NodeStub> for JsNodeStub {
+    fn from(stub: base::canvas::NodeStub) -> Self {
+        Self { stub }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = FileNodeStub)]
+pub struct JsFileNodeStub {}
+
+#[wasm_bindgen(js_class = FileNodeStub)]
+impl JsFileNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> JsFileNodeStub {
+        JsFileNodeStub {}
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stub(&self) -> JsNodeStub {
+        base::canvas::NodeStub::File.into()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = SplitByNodeStub)]
+pub struct JsSplitByNodeStub {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub regex: RegExp,
+
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub stub: JsNodeStub,
+}
+
+#[wasm_bindgen(js_class = SplitByNodeStub)]
+impl JsSplitByNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn from_regex(js_regex: RegExp) -> JsSplitByNodeStub {
+        use lazy_regex::regex::Regex;
+        let s = String::from(js_regex.source());
+        let regex = Regex::new(&s).expect("it was valid for JS and should be for us as well");
+
+        JsSplitByNodeStub {
+            regex: js_regex,
+            stub: base::canvas::NodeStub::SplitBy { regex }.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = InputNodeStub)]
+pub struct JsInputNodeStub {
+    #[wasm_bindgen(readonly, getter_with_clone, js_name = validNames)]
+    pub valid_names: Vec<JsString>,
+
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub stub: JsNodeStub,
+}
+
+#[wasm_bindgen(js_class = InputNodeStub)]
+impl JsInputNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn new(js_valid_names: Vec<JsString>) -> JsInputNodeStub {
+        let valid_names = js_valid_names
+            .iter()
+            .map(|s| String::from(s).into())
+            .collect();
+        let stub = base::canvas::NodeStub::Input { valid_names }.into();
+        JsInputNodeStub {
+            valid_names: js_valid_names,
+            stub,
+        }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = DropNodeStub)]
+pub struct JsDropNodeStub {}
+
+#[wasm_bindgen(js_class = DropNodeStub)]
+impl JsDropNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> JsDropNodeStub {
+        JsDropNodeStub {}
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stub(&self) -> JsNodeStub {
+        base::canvas::NodeStub::Drop.into()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = OutputNodeStub)]
+pub struct JsOutputNodeStub {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub ident: JsString,
+
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub stub: JsNodeStub,
+}
+
+#[wasm_bindgen(js_class = OutputNodeStub)]
+impl JsOutputNodeStub {
+    /// Create a new output node stub.
+    ///
+    /// # Errors
+    /// Passed in string should be valid identifier:
+    /// - It should start with a letter or underscore.
+    /// - It should contain only letters, digits, and underscores.
+    /// - No longer than 64 characters.
+    #[wasm_bindgen(constructor)]
+    pub fn new(name: JsString) -> Result<JsOutputNodeStub, JsError> {
+        let s = String::from(name.clone());
+        if s.len() > 64 {
+            Err(JsError::new("Name is too long"))
+        } else if lazy_regex::regex_is_match!(r"^[a-zA-Z_][a-zA-Z0-9_]*$", &s) {
+            let stub = base::canvas::NodeStub::Output { ident: s.into() }.into();
+            Ok(JsOutputNodeStub { ident: name, stub })
+        } else {
+            Err(JsError::new("Invalid name"))
+        }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = LowercaseNodeStub)]
+pub struct JsLowercaseNodeStub {}
+
+#[wasm_bindgen(js_class = LowercaseNodeStub)]
+impl JsLowercaseNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> JsLowercaseNodeStub {
+        JsLowercaseNodeStub {}
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stub(&self) -> JsNodeStub {
+        use base::canvas::*;
+        NodeStub::StrOp(StrOp::Lowercase).into()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = UppercaseNodeStub)]
+pub struct JsUppercaseNodeStub {}
+
+#[wasm_bindgen(js_class = UppercaseNodeStub)]
+impl JsUppercaseNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> JsUppercaseNodeStub {
+        JsUppercaseNodeStub {}
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stub(&self) -> JsNodeStub {
+        use base::canvas::*;
+        NodeStub::StrOp(StrOp::Uppercase).into()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = StripNodeStub)]
+pub struct JsStripNodeStub {
+    #[wasm_bindgen(readonly)]
+    pub trim_whitespace: bool,
+    #[wasm_bindgen(readonly)]
+    pub trim_end_whitespace: bool,
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub remove: Vec<JsString>,
+
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub stub: JsNodeStub,
+}
+
+#[wasm_bindgen(js_class = StripNodeStub)]
+impl JsStripNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        trim_whitespace: bool,
+        trim_end_whitespace: bool,
+        remove: Vec<JsString>,
+    ) -> JsStripNodeStub {
+        use base::canvas::*;
+
+        let stub = NodeStub::StrOp(StrOp::Strip {
+            trim_whitespace,
+            trim_end_whitespace,
+            remove: remove.iter().map(|s| String::from(s).into()).collect(),
+        })
+        .into();
+
+        JsStripNodeStub {
+            trim_whitespace,
+            trim_end_whitespace,
+            remove,
+            stub,
+        }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = CompareNodeStub)]
+pub struct JsCompareNodeStub {
+    #[wasm_bindgen(readonly)]
+    pub eq: bool,
+}
+
+#[wasm_bindgen(js_class = CompareNodeStub)]
+impl JsCompareNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn eq() -> JsCompareNodeStub {
+        JsCompareNodeStub { eq: true }
+    }
+
+    #[wasm_bindgen(constructor)]
+    pub fn ne() -> JsCompareNodeStub {
+        JsCompareNodeStub { eq: false }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stub(&self) -> JsNodeStub {
+        base::canvas::NodeStub::Compare { eq: self.eq }.into()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = OrderingNodeStub)]
+pub struct JsOrderingNodeStub;
+
+#[wasm_bindgen(js_class = OrderingNodeStub)]
+impl JsOrderingNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn ordering() -> JsOrderingNodeStub {
+        JsOrderingNodeStub
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stub(&self) -> JsNodeStub {
+        base::canvas::NodeStub::Ordering.into()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = RegexNodeStub)]
+pub struct JsRegexNodeStub {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub regex: RegExp,
+
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub stub: JsNodeStub,
+}
+
+#[wasm_bindgen(js_class = RegexNodeStub)]
+impl JsRegexNodeStub {
+    #[wasm_bindgen(constructor)]
+    pub fn from_regex(js_regex: RegExp) -> JsRegexNodeStub {
+        use lazy_regex::regex::Regex;
+        let s = String::from(js_regex.source());
+        let regex = Regex::new(&s).expect("JS thinks it is valid...");
+
+        JsRegexNodeStub {
+            regex: js_regex,
+            stub: base::canvas::NodeStub::Regex(regex).into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = MapNodeStubBuilder)]
+pub struct JsMapNodeStubBuilder {
+    /// Reverse map of "match"'s values to keys.
+    map: HashMap<CompactString, SmallVec<[CompactString; 1]>>,
+
+    input_ty: Option<base::canvas::PrimitiveType>,
+    output_ty: Option<base::canvas::PrimitiveType>,
+
+    wildcard: Option<CompactString>,
+}
+
+#[wasm_bindgen(js_class = MapNodeStubBuilder)]
+impl JsMapNodeStubBuilder {
+    pub fn add(&mut self, key: JsString, value: JsString) {
+        let key = CompactString::from(String::from(key));
+        let value = CompactString::from(String::from(value));
+        self.map.entry(value).or_default().push(key);
+    }
+
+    #[wasm_bindgen(js_name = withWildcard)]
+    pub fn set_wildcard(&mut self, value: JsString) {
+        self.wildcard = Some(CompactString::from(String::from(value)));
+    }
+
+    #[wasm_bindgen(js_name = withInputType)]
+    pub fn set_input_ty(&mut self, ty: JsDataType) {
+        self.input_ty = Some(base::canvas::PrimitiveType::from(ty));
+    }
+
+    #[wasm_bindgen(js_name = withOutputType)]
+    pub fn set_output_ty(&mut self, ty: JsDataType) {
+        self.output_ty = Some(base::canvas::PrimitiveType::from(ty));
+    }
+
+    pub fn build(self) -> Result<JsMapNodeStub, JsError> {
+        let input_ty = if let Some(input_ty) = self.input_ty {
+            input_ty
+        } else {
+            return Err(JsError::new("Input type is required"));
+        };
+        let output_ty = if let Some(output_ty) = self.output_ty {
+            output_ty
+        } else {
+            return Err(JsError::new("Output type is required"));
+        };
+
+        let map = self.map.clone();
+
+        let stub = {
+            let mut tuples = Vec::with_capacity(self.map.len());
+            for (value, keys) in self.map {
+                let pat = base::canvas::Pat::from_variants(keys);
+                tuples.push((pat, value));
+            }
+        };
+
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = MapNodeStub)]
+pub struct JsMapNodeStub {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub stub: JsNodeStub,
+}
+
+#[wasm_bindgen(js_class = MapNodeStub)]
+impl JsMapNodeStub {
+    #[wasm_bindgen(getter, js_name = map)]
+    pub fn map(&self) -> js_sys::Map {
+        if let base::canvas::NodeStub::Map { tuples, wildcard } = &self.stub {
+            let mut map = js_sys::Map::new();
+
+            for (pat, value) in tuples {
+                for key in pat
+                    .as_variants()
+                    .expect("currently the only supported option")
+                {
+                    map.set(&JsString::from(key), &JsString::from(value));
+                }
+            }
+
+            map
+        } else {
+            unreachable!("stub is not Map, but object is MapNodeStub");
+        }
+    }
+}
 
 /// Node in the canvas. This is actual instance of the placed node in a project.
 #[derive(Debug)]
@@ -192,12 +575,14 @@ impl JsNode {
     }
 
     /// Get the output pin at the given position.
-    pub fn outAt(&self, position: u32) -> Option<JsNodePin> {
+    #[wasm_bindgen(js_name = outAt)]
+    pub fn out_at(&self, position: u32) -> Option<JsNodePin> {
         todo!()
     }
 
     /// Get the input pin at the given position.
-    pub fn inAt(&self, position: u32) -> Option<JsNodePin> {
+    #[wasm_bindgen(js_name = inAt)]
+    pub fn in_at(&self, position: u32) -> Option<JsNodePin> {
         todo!()
     }
 
@@ -309,18 +694,213 @@ pub enum JsDataTypeKind {
     Array,
     Predicate,
     Result,
+    Option,
 }
 
 #[derive(Debug)]
 #[wasm_bindgen(js_name = DataType)]
 pub struct JsDataType {
-    /// The kind of the data type.
-    #[wasm_bindgen(readonly)]
-    pub kind: JsDataTypeKind,
+    repr: base::canvas::PrimitiveType,
+}
 
-    /// Whether this data type is optional or required.
-    #[wasm_bindgen(readonly, js_name = isNullable)]
-    pub is_nullable: bool,
+#[wasm_bindgen(js_class = DataType)]
+impl JsDataType {
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> JsDataTypeKind {
+        use base::canvas::PrimitiveType::*;
+        use JsDataTypeKind as J;
+        match &self.repr {
+            Int => J::Int,
+            Uint => J::Uint,
+            Unit => J::Unit,
+            Moneraty => J::Moneraty,
+            Date => J::Date,
+            DateTime => J::DateTime,
+            Time => J::Time,
+            Bool => J::Bool,
+            Str => J::Str,
+            Ordering => J::Ordering,
+            File => J::File,
+            Record => J::Record,
+            Array(_) => J::Array,
+            Predicate(_) => J::Predicate,
+            Result(_) => J::Result,
+            Option(_) => J::Option,
+        }
+    }
+
+    /// Inner data type if this is a nested data type.
+    #[wasm_bindgen(getter)]
+    pub fn inner(&self) -> std::option::Option<JsDataType> {
+        use base::canvas::PrimitiveType::*;
+        use std::ops::Deref;
+        match &self.repr {
+            Array(inner) => Some(inner.deref().to_owned().into()),
+            Result(inner) => Some(inner.deref().to_owned().into()),
+            Option(inner) => Some(inner.deref().to_owned().into()),
+
+            Predicate(_) => None,
+
+            Int => None,
+            Uint => None,
+            Unit => None,
+            Moneraty => None,
+            Date => None,
+            DateTime => None,
+            Time => None,
+            Bool => None,
+            Str => None,
+            Ordering => None,
+            File => None,
+            Record => None,
+        }
+    }
+}
+
+impl From<base::canvas::PrimitiveType> for JsDataType {
+    fn from(repr: base::canvas::PrimitiveType) -> Self {
+        Self { repr }
+    }
+}
+
+impl From<JsDataType> for base::canvas::PrimitiveType {
+    fn from(js: JsDataType) -> Self {
+        js.repr
+    }
+}
+
+/// A value as an instance of a data type supported by the canvas.
+#[derive(Debug, Clone)]
+#[wasm_bindgen(js_name = Value)]
+pub struct JsDataInstance {
+    value: base::canvas::Value,
+}
+
+#[wasm_bindgen(js_class = Value)]
+impl JsDataInstance {
+    /// Get the data type of the value.
+    #[wasm_bindgen(getter, js_name = dataType)]
+    pub fn data_type(&self) -> JsDataType {
+        self.value.type_of().into()
+    }
+
+    /// Get the value as a JS value.
+    #[wasm_bindgen(getter)]
+    pub fn value(&self) -> JsValue {
+        use base::canvas::Value::*;
+        use bigdecimal::ToPrimitive;
+        use chrono::Timelike;
+        use std::cmp::Ordering;
+        use std::ops::Deref;
+        match &self.value {
+            Int(i) => JsValue::from(*i),
+            Uint(i) => JsValue::from(*i),
+            Unit => JsValue::null(),
+            Moneraty(monetary) => JsMonetary {
+                amount: monetary.to_f64().unwrap(),
+            }
+            .into(),
+            Date(naive_date) => js_sys::Date::new_with_year_month_day(
+                naive_date.year() as _,
+                naive_date.month() as _,
+                naive_date.day() as _,
+            )
+            .into(),
+            DateTime(naive_date_time) => js_sys::Date::new_with_year_month_day_hr_min_sec(
+                naive_date_time.year() as _,
+                naive_date_time.month() as _,
+                naive_date_time.day() as _,
+                naive_date_time.hour() as _,
+                naive_date_time.minute() as _,
+                naive_date_time.second() as _,
+            )
+            .into(),
+            Time(time) => JsTime {
+                hour: time.hour() as _,
+                minute: time.minute() as _,
+                second: time.second() as _,
+            }
+            .into(),
+            Bool(v) => JsValue::from(*v),
+            Str(compact_string) => JsValue::from(compact_string.as_str()),
+            Ordering(ordering) => match ordering {
+                Ordering::Less => JsOrdering::Less,
+                Ordering::Equal => JsOrdering::Equal,
+                Ordering::Greater => JsOrdering::Greater,
+            }
+            .into(),
+            Array(values) => {
+                let arr = js_sys::Array::new_with_length(values.len() as u32);
+                for (i, value) in values.iter().enumerate() {
+                    arr.set(
+                        i as u32,
+                        JsDataInstance {
+                            value: value.clone(),
+                        }
+                        .into(),
+                    );
+                }
+                arr.into()
+            }
+            Predicate(predicate) => todo!(),
+            Result { value, is_ok } => JsResult {
+                value: JsDataInstance {
+                    value: value.deref().clone(),
+                }
+                .into(),
+                is_ok: *is_ok,
+            }.into(),
+            Option { value, is_some } => JsOption {
+                value: JsDataInstance {
+                    value: value.deref().clone(),
+                }
+                .into(),
+                is_some: *is_some,
+            }.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Time)]
+pub struct JsTime {
+    pub hour: i8,
+    pub minute: i8,
+    pub second: i8,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Monetary)]
+pub struct JsMonetary {
+    pub amount: f64,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Ordering)]
+pub enum JsOrdering {
+    Less,
+    Equal,
+    Greater,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Result)]
+pub struct JsResult {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub value: JsDataInstance,
+
+    #[wasm_bindgen(readonly, js_name = isOk)]
+    pub is_ok: bool,
+}
+
+#[derive(Debug)]
+#[wasm_bindgen(js_name = Option)]
+pub struct JsOption {
+    #[wasm_bindgen(readonly, getter_with_clone)]
+    pub value: JsDataInstance,
+
+    #[wasm_bindgen(readonly, js_name = isSome)]
+    pub is_some: bool,
 }
 
 /// Peek into the flow of values. This is useful for debugging and analysis.
@@ -342,7 +922,7 @@ impl JsPeekFlow {
 
     /// Shuffle and get the array of unique values, up to the given limit.
     /// Array will have less elements if the flow does not have enough unique values.
-    /// 
+    ///
     /// This is implemented in such way so that the example validations are quick
     /// to produce several unique values, omitting full calculation of all test-file provided data.
     /// The process of fetching unique values is stopped as soon as the limit is reached.
@@ -383,7 +963,7 @@ impl JsFlowValue {
 }
 
 pub struct File {
-    name: InterString,
+    name: JsString,
 
     /// The file's contents. This is `None` if the file is not loaded into memory.
     bytes: Option<Vec<u8>>,
@@ -397,7 +977,7 @@ pub struct File {
 }
 
 impl File {
-    pub fn name(&self) -> &InterString {
+    pub fn name(&self) -> &JsString {
         &self.name
     }
 
@@ -589,7 +1169,7 @@ pub enum ProtectLevel {
 
 #[derive(Debug)]
 pub struct FileBuilder {
-    name: InterString,
+    name: JsString,
     protect_read: ProtectLevel,
     protect_delete: ProtectLevel,
     bytes: Uint8Array,
@@ -642,7 +1222,7 @@ impl JsFileBuilder {
 
     /// Build the file with the configured properties into the given project.
     /// FileBuilder handle should not be used after this call (it is consumed).
-    /// 
+    ///
     /// Throws FileBuilderError if the file cannot be built.
     #[wasm_bindgen(js_name = buildInto)]
     pub fn build_into(self, project: JsProject) -> Result<JsProjectFile, JsFileBuilderError> {
