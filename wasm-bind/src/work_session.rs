@@ -112,14 +112,28 @@ impl WorkSessionProject {
     /// Returns the position of the undone change in the history stack.
     /// If there are no changes to undo, returns `None`.
     pub fn undo(&mut self) -> Option<usize> {
-        todo!()
+        if self.changes.pos == 0 {
+            return None;
+        }
+
+        self.changes.pos -= 1;
+        let change = self.changes.stack[self.changes.pos].op.clone();
+        change.revert(self);
+        Some(self.changes.pos)
     }
 
     /// Redo the last undone change.
     /// Returns the position of the redone change in the history stack.
     /// If there are no changes to redo, returns `None`.
     pub fn redo(&mut self) -> Option<usize> {
-        todo!()
+        if self.changes.pos == self.changes.stack.len() {
+            return None;
+        }
+
+        let change = self.changes.stack[self.changes.pos].op.clone();
+        change.apply(self);
+        self.changes.pos += 1;
+        Some(self.changes.pos)
     }
 
     /// Go to a specific change.
@@ -127,7 +141,21 @@ impl WorkSessionProject {
     /// Returns the position starting from which the changes were undone or redone (position before
     /// the change). If the passed position is out of bounds, this is no-op and returns `None`.
     pub fn goto(&mut self, pos: usize) -> Option<usize> {
-        todo!()
+        if pos >= self.changes.stack.len() {
+            return None;
+        }
+
+        if pos < self.changes.pos {
+            while self.changes.pos != pos {
+                self.undo();
+            }
+        } else if pos > self.changes.pos {
+            while self.changes.pos != pos {
+                self.redo();
+            }
+        }
+
+        Some(self.changes.pos)
     }
 
     /// Get the change at a specific position in the history stack.
@@ -138,6 +166,16 @@ impl WorkSessionProject {
     /// Get the UUID of the project.
     pub fn uuid(&self) -> Uuid {
         self.project.uuid()
+    }
+
+    /// Record given change operation to the project history.
+    fn record(&mut self, op: ChangeOp) {
+        self.changes.stack.truncate(self.changes.pos);
+        self.changes.stack.push(ChangeItem {
+            timestamp: std::time::SystemTime::now(),
+            op,
+        });
+        self.changes.pos += 1;
     }
 }
 
@@ -474,7 +512,12 @@ impl ChangeOp {
     /// Apply the change operation to the project, returning the resulting actual
     /// operation. Note that the operation can be different (with different params)
     /// than the original one, e.g. ID of the new node can change.
-    pub fn apply(self, project: &mut WorkSessionProject) -> ChangeOp {
+    ///
+    /// # Panic
+    /// This method panics if the operation cannot be applied, which cannot
+    /// happen if the operation was recorded correctly and when all changes are
+    /// tracked correctly.
+    fn apply(self, project: &mut WorkSessionProject) -> ChangeOp {
         use ChangeOp::*;
 
         const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
@@ -571,19 +614,22 @@ impl ChangeOp {
     }
 
     /// Apply all change operations in the iterator to the project.
-    pub fn apply_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
+    /// See [ChangeOp::apply] for more details.
+    fn apply_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
         for op in iter {
             op.apply(project);
         }
     }
 
     /// Revert the change operation from the project.
-    pub fn revert(self, project: &mut WorkSessionProject) {
+    /// Runs internally [ChangeOp::apply] with the inverted operation.
+    fn revert(self, project: &mut WorkSessionProject) {
         Self::apply_all(self.into_inverted(), project);
     }
 
     /// Revert all change operations in the iterator from the project.
-    pub fn revert_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
+    /// See [ChangeOp::revert] for more details.
+    fn revert_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
         for op in iter {
             op.revert(project);
         }
