@@ -151,6 +151,8 @@ impl NodeEdges {
 /// in the canvas.
 pub struct Validator<'canvas, NodeMeta> {
     /// Reference to the canvas being validated.
+    /// By holding to it, we thus prevent edits to the canvas,
+    /// helping to keep internal state of this validator correct.
     canvas: &'canvas Canvas<NodeMeta>,
 
     /// Lookup table for node edges. Helps to quickly find adjacent nodes.
@@ -201,8 +203,8 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
         info!("fill in raw node-edges lookup table entries");
         for (edge_idx, edge) in self.canvas.edges.iter().enumerate() {
-            let from = edge.from.0 as usize;
-            let to = edge.to.0 as usize;
+            let from = self.canvas.node_id_to_idx(edge.from.node_id).unwrap() as usize;
+            let to = self.canvas.node_id_to_idx(edge.to.node_id).unwrap() as usize;
 
             self.node_edges[from].arr.push(edge_idx as canvas::EdgeIdx);
             self.node_edges[to].arr.push(edge_idx as canvas::EdgeIdx);
@@ -213,10 +215,11 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
         // destination or source node index, respectively.
         debug!("sort node-edges lookup table entries");
         for (idx, node_edges) in self.node_edges.iter_mut().enumerate() {
-            trace!("sort node-edges for node {idx}");
+            let id = self.canvas.nodes[idx].id;
+            trace!("sort node-edges for node {idx}/{id:?}");
             node_edges.arr.sort_by_key(|&edge| {
                 let edge = &self.canvas.edges[edge as usize];
-                if edge.to.0 == idx as canvas::NodeIdx {
+                if edge.to.node_id == id {
                     0
                 } else {
                     1
@@ -229,7 +232,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 .iter()
                 .position(|&edge| {
                     let edge = &self.canvas.edges[edge as usize];
-                    edge.to.0 != idx as canvas::NodeIdx
+                    edge.to.node_id != id
                 })
                 .map(|v| v as canvas::EdgeIdx)
                 .unwrap_or_else(|| node_edges.arr.len() as canvas::EdgeIdx);
@@ -280,10 +283,11 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
             fn next(&mut self) -> Option<Self::Item> {
                 for edge in &mut self.iter {
                     let edge = self.validator.canvas.edges[edge as usize];
-                    let node = edge.to.0;
-                    if Some(node) != self.prev {
-                        self.prev = Some(node);
-                        return Some(node);
+                    let node = edge.to.node_id;
+                    let node_idx = self.validator.canvas.node_id_to_idx(node).unwrap();
+                    if Some(node_idx) != self.prev {
+                        self.prev = Some(node_idx);
+                        return Some(node_idx);
                     }
                 }
                 None
@@ -302,20 +306,23 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
         let mut edges_with_nonexistent_pins = SmallVec::<[_; 128]>::new();
 
         for (edge_idx, edge) in self.canvas.edges.iter().enumerate() {
-            let from_node_idx = edge.from.0 as usize;
-            let to_node_idx = edge.to.0 as usize;
+            const EXIST: &str =
+                "node should exist in the canvas for which we are initializing pin-edges";
 
-            let from_stub = &self.canvas.nodes[from_node_idx].stub;
-            let to_stub = &self.canvas.nodes[to_node_idx].stub;
+            let from_stub = &self.canvas.node(edge.from.node_id).expect(EXIST).stub;
+            let to_stub = &self.canvas.node(edge.to.node_id).expect(EXIST).stub;
+
+            let from_node_idx = self.canvas.node_id_to_idx(edge.from.node_id).expect(EXIST);
+            let to_node_idx = self.canvas.node_id_to_idx(edge.to.node_id).expect(EXIST);
 
             let mut should_push_edge = false;
-            if from_stub.real_output_pin_idx(edge.from.1).is_none() {
-                trace!("edge {edge_idx} has nonexistent output pin {}", edge.from.1);
+            if from_stub.real_output_pin_idx(edge.from.order).is_none() {
+                trace!("edge {edge_idx} has nonexistent output pin {}", edge.from.order);
                 invalid_pin_cnt.push(from_node_idx as canvas::NodeIdx);
                 should_push_edge = true;
             }
-            if to_stub.real_input_pin_idx(edge.to.1).is_none() {
-                trace!("edge {edge_idx} has nonexistent input pin {}", edge.to.1);
+            if to_stub.real_input_pin_idx(edge.to.order).is_none() {
+                trace!("edge {edge_idx} has nonexistent input pin {}", edge.to.order);
                 invalid_pin_cnt.push(to_node_idx as canvas::NodeIdx);
                 should_push_edge = true;
             }
@@ -397,7 +404,7 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
                 let mut cycles = SmallVec::<[_; 8]>::new();
 
                 debug!("detect cycles in the canvas for flows from root nodes");
-                for root in self.canvas.root_nodes.iter().copied() {
+                for root in self.canvas.root_nodes_inner() {
                     visitor.visit(self, root, &mut cycles);
                 }
 
@@ -600,7 +607,7 @@ impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
                 self.node_to_pins.push(PinMap {
                     node_idx: node_idx as canvas::NodeIdx,
                     pin: pin as canvas::PinOrder,
-                    map_idx: usize::MAX, // tmp invalid value
+                    map_idx: Typed::UNRESOLVER_TYPE,
                 });
             }
         }
@@ -609,16 +616,16 @@ impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
 
         trace!("init pins for all nodes, which appear in an edge");
         let mut cnt = 0;
-        for edge in self.canvas().edges.iter() {
+        for edge in self.canvas().edges_inner() {
             let result_to = self.node_to_pins.binary_search(&PinMap {
                 node_idx: edge.to.0,
                 pin: edge.to.1,
-                map_idx: usize::MAX,
+                map_idx: Typed::UNRESOLVER_TYPE,
             });
             let result_from = self.node_to_pins.binary_search(&PinMap {
                 node_idx: edge.from.0,
                 pin: edge.from.1,
-                map_idx: usize::MAX,
+                map_idx: Typed::UNRESOLVER_TYPE,
             });
 
             match (result_to, result_from) {
@@ -726,8 +733,7 @@ impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
         self.init_pins();
 
         // We start from the root nodes and then propagate the types.
-        self.resolve_next
-            .extend(self.canvas().root_nodes.iter().copied());
+        self.resolve_next.extend(self.canvas().root_nodes_inner());
 
         while let Some(next) = self.resolve_next.pop_back() {
             if self
@@ -869,18 +875,10 @@ impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
 
     /// Mark this node as erroneous.
     fn mark_node_err(&mut self, node: canvas::NodeIdx) {
-        // TODO this can be done simpler since we have 'pins' array now.
-
-        trace!("marking all {node} node's edges as erroneous");
-        let node_edges = &self.validator.node_edges[node as usize];
-        for edge_idx in node_edges.arr.iter().copied() {
-            let edge = &self.canvas().edges[edge_idx as usize];
-            let pin_idx = if edge.from.0 == node {
-                edge.from.1
-            } else {
-                edge.to.1
-            };
-            self.pin_ty_mut(node, pin_idx).is_err = true;
+        for i in 0..self.node_pins(node).len() {
+            let pin_map = &self.node_pins(node)[i];
+            let pin = self.pin_ty_mut(node, pin_map.pin);
+            pin.is_err = true;
         }
     }
 }
@@ -1013,8 +1011,12 @@ mod tests {
         let parse1 = canvas.add_node(parse_int_stub, ());
         let order = canvas.add_node(ordering_stub, ());
 
-        canvas.add_edge_by_parts(outpin!(input0, 1), inpin!(parse0)).unwrap();
-        canvas.add_edge_by_parts(outpin!(input1, 1), inpin!(parse1)).unwrap();
+        canvas
+            .add_edge_by_parts(outpin!(input0, 1), inpin!(parse0))
+            .unwrap();
+        canvas
+            .add_edge_by_parts(outpin!(input1, 1), inpin!(parse1))
+            .unwrap();
         canvas
             .add_edge_by_parts(outpin!(parse0, 1), inpin!(order, 0))
             .unwrap();
@@ -1083,8 +1085,12 @@ mod tests {
         let a = canvas.add_node(node.clone(), ());
         let b = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge_by_parts(outpin!(a, 0), inpin!(b, 1)).unwrap();
-        canvas.add_edge_by_parts(outpin!(b, 0), inpin!(a, 1)).unwrap();
+        canvas
+            .add_edge_by_parts(outpin!(a, 0), inpin!(b, 1))
+            .unwrap();
+        canvas
+            .add_edge_by_parts(outpin!(b, 0), inpin!(a, 1))
+            .unwrap();
 
         let mut validator = Validator::new(&canvas);
         let invalid_pin_nodes = validator.invalid_pin_nodes();
@@ -1108,8 +1114,12 @@ mod tests {
         let a = canvas.add_node(node.clone(), ());
         let b = canvas.add_node(node.clone(), ());
 
-        canvas.add_edge_by_parts(outpin!(a, 1), inpin!(b, 2)).unwrap();
-        canvas.add_edge_by_parts(outpin!(a, 1), inpin!(b, 0)).unwrap();
+        canvas
+            .add_edge_by_parts(outpin!(a, 1), inpin!(b, 2))
+            .unwrap();
+        canvas
+            .add_edge_by_parts(outpin!(a, 1), inpin!(b, 0))
+            .unwrap();
 
         let mut validator = Validator::new(&canvas);
         let invalid_pin_nodes = validator.invalid_pin_nodes();
@@ -1117,8 +1127,8 @@ mod tests {
 
         let edges_with_nonexistent_pins = validator.edges_to_nonexistent_pins();
         assert_eq!(edges_with_nonexistent_pins.len(), 1);
-        let bad_edge = &canvas.edges[edges_with_nonexistent_pins[0] as usize];
-        assert_eq!(bad_edge.from, (0, 1));
-        assert_eq!(bad_edge.to, (1, 2));
+        let bad_edge = canvas.edges[edges_with_nonexistent_pins[0] as usize];
+        assert_eq!(bad_edge.from, outpin!(a, 1));
+        assert_eq!(bad_edge.to, inpin!(b, 2));
     }
 }

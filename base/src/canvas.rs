@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::ops::{Deref, RangeInclusive};
 
 use bigdecimal::BigDecimal;
 use compact_str::CompactString;
@@ -10,18 +10,19 @@ use smallvec::SmallVec;
 #[derive(Debug)]
 pub struct Canvas<NodeMeta> {
     pub(crate) nodes: Vec<Node<NodeMeta>>,
-    pub(crate) edges: Vec<EdgeInner>,
+    pub(crate) edges: Vec<Edge>,
     rnd: SmallRng,
 
-    /// Indexes of the root nodes of the canvas.
+    /// IDs of the root nodes of the canvas.
     /// In a valid project, from these nodes the execution of the flow starts.
     /// Some nodes cannot function as a starting point of execution, but they are still
-    /// considered root nodes, as they are not connected to any other node.
+    /// considered root nodes, as they are not connected to any other node, and then
+    /// they look as a starting point of execution in their subflow.
     ///
     /// Note that this array stores all nodes that do not have a parent, even if they
     /// cannot function as a starting point of execution in the valid project.
     /// This array is later used by the validation to ensure that all nodes are reachable.
-    pub(crate) root_nodes: Vec<NodeIdx>,
+    pub(crate) root_nodes: Vec<Id>,
 }
 
 /// The type used for [Id] representation. This transitively defines the maximum number of
@@ -53,7 +54,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let id = Id::new_node_after(last, &mut self.rnd)
             .expect("node ID generation failed, maybe ID pool is used up");
 
-        self.root_nodes.push(self.nodes.len() as NodeIdx);
+        self.root_nodes.push(id);
         self.nodes.push(Node { id, stub, meta });
 
         id
@@ -68,16 +69,34 @@ impl<NodeMeta> Canvas<NodeMeta> {
             .map(move |idx| &mut self.nodes[idx as usize])
     }
 
-    fn node_edge_io_slices(&self, node_id: Id) -> Option<(&[EdgeInner], &[EdgeInner])> {
-        let idx = self.node_id_to_idx(node_id)?;
-        let slice_out = {
-            let start_edge_out = EdgeInner {
-                from: (idx, 0),
-                to: (0, 0),
+    pub fn root_nodes_inner(&self) -> impl Iterator<Item = NodeIdx> + '_ {
+        self.root_nodes.iter().map(move |&id| {
+            self.node_id_to_idx(id)
+                .expect("root node should exist in the node list")
+        })
+    }
+
+    fn node_edge_io_ranges(
+        &self,
+        node_id: Id,
+    ) -> Option<(RangeInclusive<usize>, RangeInclusive<usize>)> {
+        let range_out = {
+            let start_edge_out = Edge {
+                from: OutputPin(Pin { node_id, order: 0 }),
+                to: InputPin(Pin {
+                    node_id: Id(0),
+                    order: 0,
+                }),
             };
-            let end_edge_out = EdgeInner {
-                from: (idx + 1, 0),
-                to: (0, 0),
+            let end_edge_out = Edge {
+                from: OutputPin(Pin {
+                    node_id,
+                    order: PinOrder::MAX,
+                }),
+                to: InputPin(Pin {
+                    node_id: Id(0),
+                    order: 0,
+                }),
             };
 
             let start = match self.edges.binary_search(&start_edge_out) {
@@ -88,17 +107,27 @@ impl<NodeMeta> Canvas<NodeMeta> {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
-            &self.edges[start..end]
+
+            start..=end
         };
 
-        let slice_in = {
-            let start_edge_in = EdgeInner {
-                from: (0, 0),
-                to: (idx, 0),
+        let range_in = {
+            let start_edge_in = Edge {
+                from: OutputPin(Pin {
+                    node_id: Id(0),
+                    order: 0,
+                }),
+                to: InputPin(Pin { node_id, order: 0 }),
             };
-            let end_edge_in = EdgeInner {
-                from: (0, 0),
-                to: (idx + 1, 0),
+            let end_edge_in = Edge {
+                from: OutputPin(Pin {
+                    node_id: Id(0),
+                    order: 0,
+                }),
+                to: InputPin(Pin {
+                    node_id,
+                    order: PinOrder::MAX,
+                }),
             };
 
             let start = match self.edges.binary_search(&start_edge_in) {
@@ -109,35 +138,23 @@ impl<NodeMeta> Canvas<NodeMeta> {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
-            &self.edges[start..end]
+
+            start..=end
         };
 
-        if cfg!(debug_assertions) {
-            for e in slice_out {
-                debug_assert_eq!(e.from.0, idx);
-            }
-            for e in slice_in {
-                debug_assert_eq!(e.to.0, idx);
-            }
-        }
+        Some((range_in, range_out))
+    }
 
-        Some((slice_in, slice_out))
+    fn node_edge_io_slices(&self, node_id: Id) -> Option<(&[Edge], &[Edge])> {
+        let (inp, out) = self.node_edge_io_ranges(node_id)?;
+        Some((&self.edges[inp], &self.edges[out]))
     }
 
     /// Iterator over all edges connected to the node.
     /// Returns [None] if the node does not exist.
     pub fn node_edge_io_iter(&self, node_id: Id) -> Option<impl Iterator<Item = Edge> + '_> {
         let (slice_in, slice_out) = self.node_edge_io_slices(node_id)?;
-        Some(slice_in.iter().chain(slice_out.iter()).map(move |e| Edge {
-            from: OutputPin(Pin {
-                node_id: self.nodes[e.from.0 as usize].id,
-                order: e.from.1,
-            }),
-            to: InputPin(Pin {
-                node_id: self.nodes[e.to.0 as usize].id,
-                order: e.to.1,
-            }),
-        }))
+        Some(slice_in.iter().chain(slice_out.iter()).copied())
     }
 
     pub(crate) fn node_id_to_idx(&self, id: Id) -> Option<NodeIdx> {
@@ -150,41 +167,40 @@ impl<NodeMeta> Canvas<NodeMeta> {
     }
 
     pub fn remove_node(&mut self, id: Id) -> Option<Node<NodeMeta>> {
-        let idx = self.nodes.binary_search_by_key(&id, |n| n.id).ok()?;
+        // Remove all edges that are connected to the node.
+        let (inp, out) = self.node_edge_io_ranges(id)?;
+        let (high, low) = if inp.start() > out.start() {
+            (inp, out)
+        } else {
+            (out, inp)
+        };
+        // Remove in such order so to retain correct ranges. Higher range should be removed first,
+        // otherwise the lower range removal would shift the higher range.
+        self.edges.drain(high);
+        self.edges.drain(low);
+
+        // Remove node itself.
+        let idx = self
+            .nodes
+            .binary_search_by_key(&id, |n| n.id)
+            .ok()
+            .expect("node should exist as above code checks for that");
         let node = self.nodes.remove(idx);
 
-        // Remove all edges that are connected to the removed node.
-        let idx = idx as NodeIdx;
-        self.edges.retain(|e| e.from.0 != idx && e.to.0 != idx);
-
-        self.unroot_node(idx);
+        // Unmark the node as a root node.
+        self.unroot_node(id);
 
         Some(node)
     }
 
-    pub(crate) fn get_edge(&self, idx: EdgeIdx) -> Option<Edge> {
-        self.edges.get(idx as usize).map(|e| Edge {
-            from: OutputPin(Pin {
-                node_id: self.nodes[e.from.0 as usize].id,
-                order: e.from.1,
-            }),
-            to: InputPin(Pin {
-                node_id: self.nodes[e.to.0 as usize].id,
-                order: e.to.1,
-            }),
-        })
+    pub fn edges(&self) -> impl Iterator<Item = Edge> + '_ {
+        self.edges.iter().copied()
     }
 
-    pub fn edges(&self) -> impl Iterator<Item = Edge> + use<'_, NodeMeta> {
-        self.edges.iter().map(|e| Edge {
-            from: OutputPin(Pin {
-                node_id: self.nodes[e.from.0 as usize].id,
-                order: e.from.1,
-            }),
-            to: InputPin(Pin {
-                node_id: self.nodes[e.to.0 as usize].id,
-                order: e.to.1,
-            }),
+    pub(crate) fn edges_inner(&self) -> impl Iterator<Item = EdgeInner> + '_ {
+        self.edges.iter().map(|e| EdgeInner {
+            from: (self.node_id_to_idx(e.from.node_id).unwrap(), e.from.order),
+            to: (self.node_id_to_idx(e.to.node_id).unwrap(), e.to.order),
         })
     }
 
@@ -201,29 +217,22 @@ impl<NodeMeta> Canvas<NodeMeta> {
         from: OutputPin,
         to: InputPin,
     ) -> Result<Edge, NodeNotFoundError> {
-        let from_idx = self
-            .node_id_to_idx(from.node_id)
+        self.node(from.node_id)
             .ok_or(NodeNotFoundError(from.node_id))?;
-        let to_idx = self
-            .node_id_to_idx(to.node_id)
-            .ok_or(NodeNotFoundError(to.node_id))?;
+        self.node(to.node_id).ok_or(NodeNotFoundError(to.node_id))?;
+        self.unroot_node(to.node_id);
 
-        let edge = EdgeInner {
-            from: (from_idx, from.order),
-            to: (to_idx, to.order),
-        };
-
-        let idx = match self.edges.binary_search(&edge) {
-            Ok(idx) => idx,
+        let edge = Edge { from, to };
+        match self.edges.binary_search(&edge) {
+            Ok(_) => {
+                // Already added.
+            }
             Err(idx) => {
                 self.edges.insert(idx, edge);
-                idx
             }
         };
 
-        self.unroot_node(to_idx);
-
-        Ok(self.get_edge(idx as EdgeIdx).unwrap())
+        Ok(edge)
     }
 
     /// See [Canvas::add_edge_by_parts].
@@ -233,24 +242,16 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
     /// Remove the edge from the canvas.
     pub fn remove_edge(&mut self, edge: Edge) -> Result<(), EdgeNotFoundError> {
-        let edge_inner = EdgeInner {
-            from: (
-                self.node_id_to_idx(edge.from.node_id).unwrap(),
-                edge.from.order,
-            ),
-            to: (self.node_id_to_idx(edge.to.node_id).unwrap(), edge.to.order),
-        };
-
-        if let Some(idx) = self.edges.iter().position(|e| *e == edge_inner) {
-            self.edges.remove(idx);
-            Ok(())
-        } else {
-            Err(EdgeNotFoundError(edge))
-        }
+        let idx = self
+            .edges
+            .binary_search(&edge)
+            .map_err(|_| EdgeNotFoundError(edge))?;
+        self.edges.remove(idx);
+        Ok(())
     }
 
     /// Remove the root node from the list of root nodes, if it is present.
-    fn unroot_node(&mut self, node: NodeIdx) {
+    fn unroot_node(&mut self, node: Id) {
         if let Some(idx) = self.root_nodes.iter().position(|&n| n == node) {
             self.root_nodes.swap_remove(idx);
         }
