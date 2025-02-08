@@ -450,9 +450,9 @@ impl JsUppercaseNodeStub {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = StripNodeStub)]
 pub struct JsStripNodeStub {
-    #[wasm_bindgen(readonly)]
+    #[wasm_bindgen(readonly, js_name = trimWhitespace)]
     pub trim_whitespace: bool,
-    #[wasm_bindgen(readonly)]
+    #[wasm_bindgen(readonly, js_name = trimEndWhitespace)]
     pub trim_end_whitespace: bool,
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub remove: Vec<JsString>,
@@ -496,12 +496,10 @@ pub struct JsCompareNodeStub {
 
 #[wasm_bindgen(js_class = CompareNodeStub)]
 impl JsCompareNodeStub {
-    #[wasm_bindgen(constructor)]
     pub fn eq() -> JsCompareNodeStub {
         JsCompareNodeStub { eq: true }
     }
 
-    #[wasm_bindgen(constructor)]
     pub fn ne() -> JsCompareNodeStub {
         JsCompareNodeStub { eq: false }
     }
@@ -571,6 +569,7 @@ impl JsMapNodeStubBuilder {
     /// The output value will be set to the given value.
     /// If this function was already called for given keys, the value will remain as was set
     /// by the first call.
+    #[wasm_bindgen(js_name = orPat)]
     pub fn or_pat(&mut self, keys: Vec<JsDataInstance>, value: JsDataInstance) {
         let pat = canvas::Pat::from_variants(keys.into_iter().map(|v| v.value).collect());
         self.map.entry(pat).or_insert(value.value);

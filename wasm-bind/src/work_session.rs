@@ -467,6 +467,7 @@ impl JsHistory {
 
     /// Get the change at a specific position in the history stack.
     /// If the position is out of bounds, returns `undefined`.
+    #[wasm_bindgen(js_name = changeAt)]
     pub fn change_at(pos: usize) -> Option<JsChangeItem> {
         let ws = work_session().read().expect(WORK_SESSION_POISONED);
         let project = ws.current_project()?;

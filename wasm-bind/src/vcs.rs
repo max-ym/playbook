@@ -61,6 +61,7 @@ impl JsCommitBuilder {
 
     /// Check if the builder was invalidated. It is invalidated after a successful commit or deploy.
     /// Further operations on the invalidated builder will throw exceptions.
+    #[wasm_bindgen(getter, js_name = isInvalidated)]
     pub fn is_invalidated(&self) -> bool {
         todo!()
     }
