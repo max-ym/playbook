@@ -576,6 +576,15 @@ pub struct Validated {
     assigned: Vec<(canvas::Pin, usize)>,
 }
 
+impl Validated {
+    pub fn ty(&self, pin: canvas::Pin) -> Option<&canvas::PrimitiveType> {
+        self.assigned
+            .iter()
+            .copied()
+            .find_map(|(p, ty)| if p == pin { Some(&self.types[ty]) } else { None })
+    }
+}
+
 /// Map a pin representation in the internal map of [Resolver] to the actual
 /// nodee and pin in the canvas.
 struct PinMap {

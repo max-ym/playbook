@@ -300,6 +300,12 @@ impl WorkSessionProject {
         });
         Ok(())
     }
+
+    /// Get the known data type of the pin. [None] if the pin type is not known.
+    pub fn pin_data_type(&self, pin: base::canvas::Pin) -> Option<&base::canvas::PrimitiveType> {
+        let valid = self.valid.as_ref()?;
+        valid.ty(pin)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

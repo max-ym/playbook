@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use base::table_data;
+use base::{canvas, table_data};
 use chrono::Datelike;
 use js_sys::{JsString, RegExp, Uint8Array};
 use log::error;
@@ -18,7 +18,7 @@ use crate::{
 
 pub struct Project {
     name: JsString,
-    canvas: base::canvas::Canvas<JsonValue>,
+    canvas: canvas::Canvas<JsonValue>,
     data: SmallVec<[table_data::Table; 1]>,
     files: SmallVec<[File; 1]>,
     uuid: Uuid,
@@ -60,11 +60,11 @@ impl Project {
         self.uuid
     }
 
-    pub(crate) fn canvas(&self) -> &base::canvas::Canvas<JsonValue> {
+    pub(crate) fn canvas(&self) -> &canvas::Canvas<JsonValue> {
         &self.canvas
     }
 
-    pub(crate) fn canvas_mut(&mut self) -> &mut base::canvas::Canvas<JsonValue> {
+    pub(crate) fn canvas_mut(&mut self) -> &mut canvas::Canvas<JsonValue> {
         &mut self.canvas
     }
 }
@@ -211,7 +211,7 @@ impl JsCanvas {
     /// Add a new edge between two pins.
     #[wasm_bindgen(js_name = addEdge)]
     pub fn add_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
-        use base::canvas::{Edge, InputPin, OutputPin, Pin};
+        use canvas::{Edge, InputPin, OutputPin, Pin};
 
         let mut ws = wsw!();
         let project = ws.project_by_id_mut(self.project_uuid);
@@ -235,7 +235,7 @@ impl JsCanvas {
     /// Remove an edge between two pins.
     #[wasm_bindgen(js_name = removeEdge)]
     pub fn remove_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
-        use base::canvas::{Edge, InputPin, OutputPin, Pin};
+        use canvas::{Edge, InputPin, OutputPin, Pin};
 
         let mut ws = wsw!();
         let project = ws.project_by_id_mut(self.project_uuid);
@@ -284,11 +284,11 @@ impl JsCanvas {
 #[derive(Debug, Clone)]
 #[wasm_bindgen(js_name = NodeStub)]
 pub struct JsNodeStub {
-    stub: base::canvas::NodeStub,
+    stub: canvas::NodeStub,
 }
 
-impl From<base::canvas::NodeStub> for JsNodeStub {
-    fn from(stub: base::canvas::NodeStub) -> Self {
+impl From<canvas::NodeStub> for JsNodeStub {
+    fn from(stub: canvas::NodeStub) -> Self {
         Self { stub }
     }
 }
@@ -306,7 +306,7 @@ impl JsFileNodeStub {
 
     #[wasm_bindgen(getter)]
     pub fn stub(&self) -> JsNodeStub {
-        base::canvas::NodeStub::File.into()
+        canvas::NodeStub::File.into()
     }
 }
 
@@ -330,7 +330,7 @@ impl JsSplitByNodeStub {
 
         JsSplitByNodeStub {
             regex: js_regex,
-            stub: base::canvas::NodeStub::SplitBy { regex }.into(),
+            stub: canvas::NodeStub::SplitBy { regex }.into(),
         }
     }
 }
@@ -353,7 +353,7 @@ impl JsInputNodeStub {
             .iter()
             .map(|s| String::from(s).into())
             .collect();
-        let stub = base::canvas::NodeStub::Input { valid_names }.into();
+        let stub = canvas::NodeStub::Input { valid_names }.into();
         JsInputNodeStub {
             valid_names: js_valid_names,
             stub,
@@ -374,7 +374,7 @@ impl JsDropNodeStub {
 
     #[wasm_bindgen(getter)]
     pub fn stub(&self) -> JsNodeStub {
-        base::canvas::NodeStub::Drop.into()
+        canvas::NodeStub::Drop.into()
     }
 }
 
@@ -403,7 +403,7 @@ impl JsOutputNodeStub {
         if s.len() > 64 {
             Err(JsError::new("Name is too long"))
         } else if lazy_regex::regex_is_match!(r"^[a-zA-Z_][a-zA-Z0-9_]*$", &s) {
-            let stub = base::canvas::NodeStub::Output { ident: s.into() }.into();
+            let stub = canvas::NodeStub::Output { ident: s.into() }.into();
             Ok(JsOutputNodeStub { ident: name, stub })
         } else {
             Err(JsError::new("Invalid name"))
@@ -424,7 +424,7 @@ impl JsLowercaseNodeStub {
 
     #[wasm_bindgen(getter)]
     pub fn stub(&self) -> JsNodeStub {
-        use base::canvas::*;
+        use canvas::*;
         NodeStub::StrOp(StrOp::Lowercase).into()
     }
 }
@@ -442,7 +442,7 @@ impl JsUppercaseNodeStub {
 
     #[wasm_bindgen(getter)]
     pub fn stub(&self) -> JsNodeStub {
-        use base::canvas::*;
+        use canvas::*;
         NodeStub::StrOp(StrOp::Uppercase).into()
     }
 }
@@ -469,7 +469,7 @@ impl JsStripNodeStub {
         trim_end_whitespace: bool,
         remove: Vec<JsString>,
     ) -> JsStripNodeStub {
-        use base::canvas::*;
+        use canvas::*;
 
         let stub = NodeStub::StrOp(StrOp::Strip {
             trim_whitespace,
@@ -508,7 +508,7 @@ impl JsCompareNodeStub {
 
     #[wasm_bindgen(getter)]
     pub fn stub(&self) -> JsNodeStub {
-        base::canvas::NodeStub::Compare { eq: self.eq }.into()
+        canvas::NodeStub::Compare { eq: self.eq }.into()
     }
 }
 
@@ -525,7 +525,7 @@ impl JsOrderingNodeStub {
 
     #[wasm_bindgen(getter)]
     pub fn stub(&self) -> JsNodeStub {
-        base::canvas::NodeStub::Ordering.into()
+        canvas::NodeStub::Ordering.into()
     }
 }
 
@@ -549,7 +549,7 @@ impl JsRegexNodeStub {
 
         JsRegexNodeStub {
             regex: js_regex,
-            stub: base::canvas::NodeStub::Regex(regex).into(),
+            stub: canvas::NodeStub::Regex(regex).into(),
         }
     }
 }
@@ -559,7 +559,7 @@ impl JsRegexNodeStub {
 pub struct JsMapNodeStubBuilder {
     /// Map given pattern to given value(s). Many values can be given,
     /// if the node has several outputs, corresponding to each value position.
-    map: HashMap<base::canvas::Pat, base::canvas::Value>,
+    map: HashMap<canvas::Pat, canvas::Value>,
 
     #[wasm_bindgen(getter_with_clone)]
     pub wildcard: Vec<JsDataInstance>,
@@ -572,7 +572,7 @@ impl JsMapNodeStubBuilder {
     /// If this function was already called for given keys, the value will remain as was set
     /// by the first call.
     pub fn or_pat(&mut self, keys: Vec<JsDataInstance>, value: JsDataInstance) {
-        let pat = base::canvas::Pat::from_variants(keys.into_iter().map(|v| v.value).collect());
+        let pat = canvas::Pat::from_variants(keys.into_iter().map(|v| v.value).collect());
         self.map.entry(pat).or_insert(value.value);
     }
 
@@ -584,14 +584,14 @@ impl JsMapNodeStubBuilder {
             let w = self.wildcard.into_iter().next().unwrap();
             Some(w.value)
         } else {
-            Some(base::canvas::Value::Array(
+            Some(canvas::Value::Array(
                 self.wildcard.into_iter().map(|v| v.value).collect(),
             ))
         };
 
         if self.map.is_empty() {
             return Ok(JsMapNodeStub {
-                stub: base::canvas::NodeStub::Map {
+                stub: canvas::NodeStub::Map {
                     tuples: Default::default(),
                     wildcard,
                 }
@@ -617,7 +617,7 @@ impl JsMapNodeStubBuilder {
         }
 
         Ok(JsMapNodeStub {
-            stub: base::canvas::NodeStub::Map {
+            stub: canvas::NodeStub::Map {
                 tuples: self.map.into_iter().collect(),
                 wildcard,
             }
@@ -637,7 +637,7 @@ pub struct JsMapNodeStub {
 impl JsMapNodeStub {
     #[wasm_bindgen(getter, js_name = map)]
     pub fn map(&self) -> js_sys::Map {
-        if let base::canvas::NodeStub::Map { tuples, .. } = &self.stub.stub {
+        if let canvas::NodeStub::Map { tuples, .. } = &self.stub.stub {
             let map = js_sys::Map::new();
 
             for (pat, value) in tuples.clone() {
@@ -662,7 +662,7 @@ impl JsMapNodeStub {
 #[wasm_bindgen(js_name = Node)]
 pub struct JsNode {
     project_uuid: Uuid,
-    node_id: base::canvas::Id,
+    node_id: canvas::Id,
 }
 
 #[wasm_bindgen(js_class = Node)]
@@ -793,20 +793,23 @@ impl JsNodeIter {
 #[wasm_bindgen(js_name = NodePin)]
 pub struct JsNodePin {
     project_uuid: Uuid,
-    node_id: base::canvas::Id,
-    ordinal: base::canvas::PinOrder,
+    node_id: canvas::Id,
+    ordinal: canvas::PinOrder,
 }
 
 #[wasm_bindgen(js_class = NodePin)]
 impl JsNodePin {
     /// Get the data type of the pin.
     /// If the pin has unknown data type, this will return `undefined`.
-    /// If the pin has nested data type, this will return an array of data types, where
-    /// the first element is the outermost data type.
-    /// Normal data type will return a single element array.
     #[wasm_bindgen(getter, js_name = dataType)]
-    pub fn data_type(&self) -> Option<Vec<JsDataType>> {
-        todo!()
+    pub fn data_type(&self) -> Option<JsDataType> {
+        let ws = wsr!();
+        let project = ws.project_by_id(self.project_uuid)?;
+        let ty = project.pin_data_type(canvas::Pin {
+            node_id: self.node_id,
+            order: self.ordinal,
+        })?;
+        Some(ty.to_owned().into())
     }
 
     /// Whether the pin is an output pin (`true`). If it is an input pin, this returns `false`.
@@ -825,18 +828,12 @@ impl JsNodePin {
         }
     }
 
-    /// Whether the pin accepts optional values.
-    #[wasm_bindgen(getter, js_name = isNullable)]
-    pub fn is_nullable(&self) -> bool {
-        todo!()
-    }
-
     /// Get the position of the pin on the node.
     ///
     /// This is a converted ordinal, not absolute position in the node as per internal logic.
     /// This uniquely identifies input and output pins separately.
     #[wasm_bindgen(getter)]
-    pub fn ordinal(&self) -> Result<base::canvas::PinOrder, JsError> {
+    pub fn ordinal(&self) -> Result<canvas::PinOrder, JsError> {
         let is_output = self.is_output().ok_or(InvalidHandleError)?;
 
         let ws = wsr!();
@@ -900,14 +897,14 @@ pub enum JsDataTypeKind {
 #[derive(Debug, Clone)]
 #[wasm_bindgen(js_name = DataType)]
 pub struct JsDataType {
-    repr: base::canvas::PrimitiveType,
+    repr: canvas::PrimitiveType,
 }
 
 #[wasm_bindgen(js_class = DataType)]
 impl JsDataType {
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> JsDataTypeKind {
-        use base::canvas::PrimitiveType::*;
+        use canvas::PrimitiveType::*;
         use JsDataTypeKind as J;
         match &self.repr {
             Int => J::Int,
@@ -932,7 +929,7 @@ impl JsDataType {
     /// Inner data type if this is a nested data type.
     #[wasm_bindgen(getter)]
     pub fn inner(&self) -> std::option::Option<JsDataType> {
-        use base::canvas::PrimitiveType::*;
+        use canvas::PrimitiveType::*;
         use std::ops::Deref;
         match &self.repr {
             Array(inner) => Some(inner.deref().to_owned().into()),
@@ -957,13 +954,13 @@ impl JsDataType {
     }
 }
 
-impl From<base::canvas::PrimitiveType> for JsDataType {
-    fn from(repr: base::canvas::PrimitiveType) -> Self {
+impl From<canvas::PrimitiveType> for JsDataType {
+    fn from(repr: canvas::PrimitiveType) -> Self {
         Self { repr }
     }
 }
 
-impl From<JsDataType> for base::canvas::PrimitiveType {
+impl From<JsDataType> for canvas::PrimitiveType {
     fn from(js: JsDataType) -> Self {
         js.repr
     }
@@ -973,7 +970,7 @@ impl From<JsDataType> for base::canvas::PrimitiveType {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 #[wasm_bindgen(js_name = Value)]
 pub struct JsDataInstance {
-    value: base::canvas::Value,
+    value: canvas::Value,
 }
 
 #[wasm_bindgen(js_class = Value)]
@@ -987,7 +984,7 @@ impl JsDataInstance {
     /// Get the value as a JS value.
     #[wasm_bindgen(getter)]
     pub fn value(&self) -> JsValue {
-        use base::canvas::Value::*;
+        use canvas::Value::*;
         use bigdecimal::ToPrimitive;
         use chrono::Timelike;
         use std::cmp::Ordering;
