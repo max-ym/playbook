@@ -273,7 +273,7 @@ impl JsWorkSession {
     /// Get the current project in the work session. Returns `undefined` if there are no projects.
     #[wasm_bindgen(getter, js_name = currentProject)]
     pub fn current_project(&self) -> Option<project::JsProject> {
-        let ws = work_session().read().expect(WORK_SESSION_POISONED);
+        let ws = wsr!();
         let project = ws.current_project()?;
         Some(project::JsProject {
             uuid: project.uuid(),
@@ -287,7 +287,7 @@ impl JsWorkSession {
     /// recovered by switching back to the previous project.
     #[wasm_bindgen(js_name = switchCurrentProject)]
     pub fn switch_current_project(&self, project: project::JsProject) -> Result<(), JsError> {
-        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let mut ws = wsw!();
         ws.switch_current_project(project.uuid)
             .map_err(|_| JsError::new("Project not found"))
     }
@@ -335,7 +335,7 @@ impl JsWorkSession {
     /// background downloads, etc.
     #[wasm_bindgen(setter, js_name = onStateChange)]
     pub fn set_on_state_change(&mut self, f: js_sys::Function) {
-        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let mut ws = wsw!();
         ws.on_state_change = Some(f);
     }
 }
@@ -353,7 +353,7 @@ impl JsHistory {
     /// Returns the undone change in the history stack.
     /// If there are no changes to undo, returns `undefined`.
     pub fn undo() -> Option<JsChangeItem> {
-        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let mut ws = wsw!();
         let project = ws.current_project_mut()?;
         let position = project.undo()?;
         project.change_at(position).map(|change| JsChangeItem {
@@ -367,7 +367,7 @@ impl JsHistory {
     /// Returns the redone change in the history stack.
     /// If there are no changes to redo, returns `undefined`.
     pub fn redo() -> Option<JsChangeItem> {
-        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let mut ws = wsw!();
         let project = ws.current_project_mut()?;
         let position = project.redo()?;
         project.change_at(position).map(|change| JsChangeItem {
@@ -382,7 +382,7 @@ impl JsHistory {
     /// Returns the position starting from which the changes were undone or redone (position before
     /// the change). If the passed position is out of bounds, this is no-op and returns `undefined`.
     pub fn goto(pos: usize) -> Option<usize> {
-        let mut ws = work_session().write().expect(WORK_SESSION_POISONED);
+        let mut ws = wsw!();
         let project = ws.current_project_mut()?;
         project.goto(pos)
     }
