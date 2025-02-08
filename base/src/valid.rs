@@ -3,7 +3,7 @@ use std::{borrow::Borrow, collections::VecDeque, marker::PhantomData};
 use log::{debug, info, trace};
 use smallvec::SmallVec;
 
-use crate::canvas::{self, Canvas};
+use crate::canvas::{self, Canvas, PinOrder};
 
 #[derive(Debug, Clone)]
 struct AssignedType {
@@ -31,7 +31,7 @@ pub struct Typed<'canvas> {
     nodes: Vec<Vec<usize>>,
 }
 
-impl Typed<'_> {
+impl<'canvas> Typed<'canvas> {
     /// Special type index for unresolved types.
     const UNRESOLVED_TYPE: usize = usize::MAX;
 
@@ -41,10 +41,50 @@ impl Typed<'_> {
             .iter()
             .all(|node| node.iter().all(|&ty| ty != Self::UNRESOLVED_TYPE))
     }
+
+    /// Convert the typed data into a validated structure detached from canvas.
+    /// After that point, canvas can again be edited, and the validated structure
+    /// can be used to query the types of the pins, provided that associated
+    /// nodes were not changed. For the changed nodes, the validated structure
+    /// may contain stale data, but all unchanged nodes likely will remain correct.
+    pub fn into_validated<T>(self, canvas: &'canvas Canvas<T>) -> Validated {
+        assert_eq!(self.nodes.len(), canvas.nodes.len());
+        let mut assigned = Vec::with_capacity(self.nodes.iter().map(Vec::len).sum());
+
+        for (node_idx, node_pins) in self.nodes.iter().enumerate() {
+            debug_assert_eq!(
+                node_pins.len() as PinOrder,
+                canvas
+                    .node_by_idx(node_idx as canvas::NodeIdx)
+                    .unwrap()
+                    .stub
+                    .total_pin_count()
+            );
+
+            let node_id = canvas.nodes[node_idx].id;
+
+            for (pin_idx, &ty) in node_pins.iter().enumerate() {
+                let pin = canvas::Pin {
+                    node_id,
+                    order: pin_idx as PinOrder,
+                };
+                
+                assigned.push((pin, ty));
+            }
+        }
+
+        debug_assert!(assigned.is_sorted());
+
+        Validated {
+            types: self.types,
+            assigned,
+        }
+    }
 }
 
 impl<'canvas, T> Canvas<T> {
     /// Get pin type for given pin. Returns [Ok] of [None] if the pin has no resolved type.
+    /// Returns [Ok] with [Some] resolved type. Returns [Err] if the node/pin does not exist.
     pub fn pin_type<'typed>(
         &'canvas self,
         typed: &'typed Typed<'canvas>,
@@ -84,7 +124,7 @@ pub enum PinQueryError {
 }
 
 /// Cycles in the canvas.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cycles<'canvas> {
     _canvas: PhantomData<&'canvas Canvas<()>>,
 
@@ -149,6 +189,7 @@ impl NodeEdges {
 
 /// Validator for the whole canvas. Validates all the nodes and edges
 /// in the canvas.
+#[derive(Debug)]
 pub struct Validator<'canvas, NodeMeta> {
     /// Reference to the canvas being validated.
     /// By holding to it, we thus prevent edits to the canvas,
@@ -317,12 +358,18 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
 
             let mut should_push_edge = false;
             if from_stub.real_output_pin_idx(edge.from.order).is_none() {
-                trace!("edge {edge_idx} has nonexistent output pin {}", edge.from.order);
+                trace!(
+                    "edge {edge_idx} has nonexistent output pin {}",
+                    edge.from.order
+                );
                 invalid_pin_cnt.push(from_node_idx as canvas::NodeIdx);
                 should_push_edge = true;
             }
             if to_stub.real_input_pin_idx(edge.to.order).is_none() {
-                trace!("edge {edge_idx} has nonexistent input pin {}", edge.to.order);
+                trace!(
+                    "edge {edge_idx} has nonexistent input pin {}",
+                    edge.to.order
+                );
                 invalid_pin_cnt.push(to_node_idx as canvas::NodeIdx);
                 should_push_edge = true;
             }
@@ -514,6 +561,19 @@ impl<'canvas, NodeMeta> Validator<'canvas, NodeMeta> {
         }
         self.types.as_ref()
     }
+}
+
+/// Validated canvas data, detached from the canvas itself.
+pub struct Validated {
+    /// Unique types defined in the canvas. This collects all the types
+    /// that appeared during type resolution, including complex ones,
+    /// like Result of Result of Int etc.
+    types: Vec<canvas::PrimitiveType>,
+
+    /// Assigned types for the node pins.
+    /// This maps each pin to the index in the [Self::types] array.
+    /// Array is ordered by the node index, and then by the pin order.
+    assigned: Vec<(canvas::Pin, usize)>,
 }
 
 /// Map a pin representation in the internal map of [Resolver] to the actual

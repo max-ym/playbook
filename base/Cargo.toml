@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 log = "0.4"
+thiserror = "2.0"
 compact_str = "0.8"
 smallvec = { version = "1.13", features = ["union", "const_generics"] }
 lazy-regex = "3.4"

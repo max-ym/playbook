@@ -3,6 +3,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base::canvas::{EdgeNotFoundError, NodeNotFoundError};
+use base::valid::Validated;
 use smallvec::SmallVec;
 use uuid::Uuid;
 
@@ -121,6 +122,12 @@ pub struct WorkSessionProject {
 
     /// History stack of changes made to the project.
     changes: ChangeStack,
+
+    /// Latest validation of the project's canvas.
+    valid: Option<Validated>,
+
+    /// Whether the project should be revalidated.
+    revalidate: bool,
 }
 
 impl Deref for WorkSessionProject {
@@ -146,6 +153,8 @@ impl WorkSessionProject {
             return None;
         }
 
+        self.require_revalidate();
+
         self.changes.pos -= 1;
         let change = self.changes.stack[self.changes.pos].op.clone();
         change.revert(self);
@@ -159,6 +168,8 @@ impl WorkSessionProject {
         if self.changes.pos == self.changes.stack.len() {
             return None;
         }
+
+        self.require_revalidate();
 
         let change = self.changes.stack[self.changes.pos].op.clone();
         change.apply(self);
@@ -218,11 +229,17 @@ impl WorkSessionProject {
         self.changes.pos += 1;
     }
 
+    /// Mark the project as requiring revalidation.
+    fn require_revalidate(&mut self) {
+        self.revalidate = true;
+    }
+
     pub fn add_node(
         &mut self,
         stub: base::canvas::NodeStub,
         meta: serde_json::Value,
     ) -> base::canvas::Id {
+        self.require_revalidate();
         let id = self
             .project
             .canvas_mut()
@@ -237,6 +254,7 @@ impl WorkSessionProject {
 
     pub fn remove_node(&mut self, id: base::canvas::Id) -> Result<(), NodeNotFoundError> {
         let (node, removed_edges) = self.project.canvas_mut().remove_node(id)?;
+        self.require_revalidate();
         self.record(ChangeOp::RemoveNode {
             removed_edges,
             stub: Box::new(node.stub),
@@ -246,14 +264,16 @@ impl WorkSessionProject {
         Ok(())
     }
 
-    pub fn add_edge(&mut self, edge: base::canvas::Edge) {
-        let op = ChangeOp::AddEdge { edge };
-        let outcome_op = op.apply(self);
-        self.record(outcome_op);
+    pub fn add_edge(&mut self, edge: base::canvas::Edge) -> Result<(), NodeNotFoundError> {
+        self.require_revalidate();
+        self.project.canvas_mut().add_edge(edge)?;
+        self.record(ChangeOp::AddEdge { edge });
+        Ok(())
     }
 
     pub fn remove_edge(&mut self, edge: base::canvas::Edge) -> Result<(), EdgeNotFoundError> {
         self.project.canvas_mut().remove_edge(edge)?;
+        self.require_revalidate();
         self.record(ChangeOp::RemoveEdge { edge });
         Ok(())
     }

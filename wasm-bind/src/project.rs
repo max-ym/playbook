@@ -204,7 +204,55 @@ impl JsCanvas {
             })
         } else {
             error!("Project not found. Was removed from work session. Project handle is invalid.");
-            Err(JsError::new("Project not found, handle is invalid"))
+            Err(InvalidHandleError.into())
+        }
+    }
+
+    /// Add a new edge between two pins.
+    #[wasm_bindgen(js_name = addEdge)]
+    pub fn add_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
+        use base::canvas::{Edge, InputPin, OutputPin, Pin};
+
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.project_uuid);
+        if let Some(project) = project {
+            let from = OutputPin(Pin {
+                node_id: from.node_id,
+                order: from.ordinal,
+            });
+            let to = InputPin(Pin {
+                node_id: to.node_id,
+                order: to.ordinal,
+            });
+            project.add_edge(Edge { from, to })?;
+            Ok(())
+        } else {
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
+            Err(InvalidHandleError.into())
+        }
+    }
+
+    /// Remove an edge between two pins.
+    #[wasm_bindgen(js_name = removeEdge)]
+    pub fn remove_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
+        use base::canvas::{Edge, InputPin, OutputPin, Pin};
+
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.project_uuid);
+        if let Some(project) = project {
+            let from = OutputPin(Pin {
+                node_id: from.node_id,
+                order: from.ordinal,
+            });
+            let to = InputPin(Pin {
+                node_id: to.node_id,
+                order: to.ordinal,
+            });
+            project.remove_edge(Edge { from, to })?;
+            Ok(())
+        } else {
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
+            Err(InvalidHandleError.into())
         }
     }
 
@@ -221,7 +269,7 @@ impl JsCanvas {
         let ws = wsr!();
         let project = ws
             .project_by_id(self.project_uuid)
-            .ok_or_else(|| JsError::new("Project handle invalid"))?;
+            .ok_or(InvalidHandleError)?;
 
         Ok(JsNodeIter {
             detect_change: project.detect_changed_stack(),
@@ -631,10 +679,10 @@ impl JsNode {
             if let Some(node) = project.canvas().node(self.node_id) {
                 Ok(node.stub.clone().into())
             } else {
-                Err(JsError::new("Node not found"))
+                Err(InvalidHandleError.into())
             }
         } else {
-            Err(JsError::new("Project not found"))
+            Err(InvalidHandleError.into())
         }
     }
 
@@ -644,11 +692,11 @@ impl JsNode {
         let ws = wsr!();
         let project = ws
             .project_by_id(self.project_uuid)
-            .ok_or_else(|| JsError::new("Project not found"))?;
+            .ok_or(InvalidHandleError)?;
         let node = project
             .canvas()
             .node(self.node_id)
-            .ok_or_else(|| JsError::new("Node not found"))?;
+            .ok_or(InvalidHandleError)?;
         if let Some(ordinal) = node.stub.real_output_pin_idx(position as _) {
             Ok(JsNodePin {
                 project_uuid: self.project_uuid,
@@ -656,7 +704,8 @@ impl JsNode {
                 ordinal: ordinal as _,
             })
         } else {
-            Err(JsError::new("Output pin not found"))
+            error!("Output pin not found at position {position}");
+            Err(PinNotFoundError.into())
         }
     }
 
@@ -688,14 +737,11 @@ impl JsNode {
         let mut ws = wsw!();
         let project = ws.project_by_id_mut(self.project_uuid);
         if let Some(project) = project {
-            project.remove_node(self.node_id).map_err(|e| {
-                error!("Failed to remove node from the canvas. {:?}", e);
-                JsError::new("Failed to remove node from the canvas")
-            })?;
+            project.remove_node(self.node_id)?;
             Ok(stub)
         } else {
             error!("Project not found. Was removed from work session. Project handle is invalid.");
-            Err(JsError::new("Project not found, handle is invalid"))
+            Err(InvalidHandleError.into())
         }
     }
 }
@@ -717,6 +763,7 @@ impl JsNodeIter {
     /// Returns `undefined` if there are no more nodes.
     pub fn next(&mut self) -> Option<JsNode> {
         if !self.is_valid() {
+            error!("Node iterator is invalid. Stopping iteration.");
             return None;
         }
 
@@ -773,6 +820,7 @@ impl JsNodePin {
         } else if node.stub.is_valid_output_ordinal(self.ordinal) {
             Some(true)
         } else {
+            error!("Pin ordinal is invalid. Cannot determine if it is input or output.");
             None
         }
     }
@@ -1230,7 +1278,7 @@ impl JsProjectFile {
         if cfg!(feature = "fake_server") {
             return Err(FileLoadError::ServerError);
         }
-        
+
         todo!()
     }
 

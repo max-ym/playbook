@@ -1,4 +1,7 @@
-use std::ops::{Deref, RangeInclusive};
+use std::{
+    fmt::{Display, Formatter},
+    ops::{Deref, RangeInclusive},
+};
 
 use bigdecimal::BigDecimal;
 use compact_str::CompactString;
@@ -6,6 +9,7 @@ use lazy_regex::Regex;
 use log::trace;
 use rand::rngs::SmallRng;
 use smallvec::SmallVec;
+use thiserror::Error;
 
 #[derive(Debug)]
 pub struct Canvas<NodeMeta> {
@@ -266,10 +270,12 @@ impl<NodeMeta> Canvas<NodeMeta> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("node `{0}` not found")]
 pub struct NodeNotFoundError(pub Id);
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("edge `{0}` not found")]
 pub struct EdgeNotFoundError(pub Edge);
 
 #[derive(Debug)]
@@ -330,13 +336,31 @@ impl Pin {
     }
 }
 
+impl Display for Pin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.node_id, self.order)
+    }
+}
+
 /// The [Pin] that is used as an ontput from the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OutputPin(pub(crate) Pin);
+pub struct OutputPin(pub Pin);
+
+impl Display for OutputPin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// The [Pin] that is used as an input to the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InputPin(pub(crate) Pin);
+pub struct InputPin(pub Pin);
+
+impl Display for InputPin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 impl Deref for OutputPin {
     type Target = Pin;
@@ -366,6 +390,12 @@ pub struct Edge {
     pub to: InputPin,
 }
 
+impl Display for Edge {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}", self.from, self.to)
+    }
+}
+
 /// A unique identifier for a node or edge.
 /// [Edge] and [Node] IDs are unique in the entire [Canvas].
 /// They are used to refer to specific nodes and edges in the canvas.
@@ -379,6 +409,16 @@ pub struct Edge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Id(IdInnerType);
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_node() {
+            write!(f, "Node{}", self.unprefix())
+        } else {
+            write!(f, "Err{}", self.unprefix())
+        }
+    }
+}
 
 impl Id {
     pub const NODE_PREFIX: u32 = 0x4000_0000;
@@ -404,6 +444,10 @@ impl Id {
 
     pub const fn get(&self) -> u32 {
         self.0
+    }
+
+    pub const fn is_node(&self) -> bool {
+        self.0 & Self::NODE_PREFIX != 0
     }
 }
 
