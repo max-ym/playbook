@@ -166,18 +166,22 @@ impl<NodeMeta> Canvas<NodeMeta> {
             .map(|v| v as NodeIdx)
     }
 
-    pub fn remove_node(&mut self, id: Id) -> Option<Node<NodeMeta>> {
+    pub fn remove_node(
+        &mut self,
+        id: Id,
+    ) -> Result<(Node<NodeMeta>, Vec<Edge>), NodeNotFoundError> {
         // Remove all edges that are connected to the node.
-        let (inp, out) = self.node_edge_io_ranges(id)?;
+        let (inp, out) = self.node_edge_io_ranges(id).ok_or(NodeNotFoundError(id))?;
         let (high, low) = if inp.start() > out.start() {
             (inp, out)
         } else {
             (out, inp)
         };
+        let mut edges = Vec::with_capacity(high.end() - high.start() + low.end() - low.start());
         // Remove in such order so to retain correct ranges. Higher range should be removed first,
         // otherwise the lower range removal would shift the higher range.
-        self.edges.drain(high);
-        self.edges.drain(low);
+        edges.extend(self.edges.drain(high));
+        edges.extend(self.edges.drain(low));
 
         // Remove node itself.
         let idx = self
@@ -190,7 +194,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         // Unmark the node as a root node.
         self.unroot_node(id);
 
-        Some(node)
+        Ok((node, edges))
     }
 
     pub fn edges(&self) -> impl Iterator<Item = Edge> + '_ {
@@ -374,29 +378,24 @@ pub struct Id(IdInnerType);
 
 impl Id {
     pub const NODE_PREFIX: u32 = 0x4000_0000;
-    pub const EDGE_PREFIX: u32 = 0x2000_0000;
     pub const RND_MAX_STEP: u32 = 128;
+    pub const ZERO: Id = Id(0);
 
     /// Allocate a new node ID.
     pub fn new_node_after(id: Id, rng: &mut SmallRng) -> Option<Id> {
         Self::new(id, rng, Self::NODE_PREFIX)
     }
 
-    /// Allocate a new edge ID.
-    pub fn new_edge_after(id: Id, rng: &mut SmallRng) -> Option<Id> {
-        Self::new(id, rng, Self::EDGE_PREFIX)
-    }
-
     fn new(id: Id, rng: &mut SmallRng, prefix: u32) -> Option<Id> {
         use rand::RngCore;
-        let step = rng.next_u32() % Self::RND_MAX_STEP;
+        let step = 1 + rng.next_u32() % Self::RND_MAX_STEP;
         let new_id = id.unprefix().checked_add(step)?;
         Some(Id(new_id | prefix))
     }
 
     /// Remove all prefix bits from the ID.
     pub const fn unprefix(self) -> u32 {
-        self.0 & !(Self::NODE_PREFIX | Self::EDGE_PREFIX)
+        self.0 & !Self::NODE_PREFIX
     }
 
     pub const fn get(&self) -> u32 {

@@ -1,7 +1,8 @@
 use std::sync::{OnceLock, RwLock};
 use std::time::UNIX_EPOCH;
 
-use smallvec::{smallvec, SmallVec};
+use base::canvas::{EdgeNotFoundError, NodeNotFoundError};
+use smallvec::SmallVec;
 use uuid::Uuid;
 
 use crate::project::Project;
@@ -53,20 +54,14 @@ impl WorkSession {
 
     /// Access the project by its UUID. Returns [None] if the project is not loaded
     /// into the work session.
-    pub fn project_by_id_mut(&mut self, uuid: Uuid) -> Option<&mut crate::project::Project> {
-        self.projects
-            .iter_mut()
-            .find(|p| p.project.uuid() == uuid)
-            .map(|p| &mut p.project)
+    pub fn project_by_id_mut(&mut self, uuid: Uuid) -> Option<&mut WorkSessionProject> {
+        self.projects.iter_mut().find(|p| p.project.uuid() == uuid)
     }
 
     /// Access the project by its UUID. Returns [None] if the project is not loaded
     /// into the work session.
-    pub fn project_by_id(&self, uuid: Uuid) -> Option<&crate::project::Project> {
-        self.projects
-            .iter()
-            .find(|p| p.project.uuid() == uuid)
-            .map(|p| &p.project)
+    pub fn project_by_id(&self, uuid: Uuid) -> Option<&WorkSessionProject> {
+        self.projects.iter().find(|p| p.project.uuid() == uuid)
     }
 
     /// The currently active project in the work session. Returns [None] if there are no projects.
@@ -176,6 +171,62 @@ impl WorkSessionProject {
             op,
         });
         self.changes.pos += 1;
+    }
+
+    pub fn add_node(&mut self, stub: base::canvas::NodeStub, meta: serde_json::Value) {
+        let op = ChangeOp::AddNode {
+            stub: Box::new(stub),
+            meta,
+            id: base::canvas::Id::ZERO,
+        };
+        let outcome_op = op.apply(self);
+        self.record(outcome_op);
+    }
+
+    pub fn remove_node(&mut self, id: base::canvas::Id) -> Result<(), NodeNotFoundError> {
+        let (node, removed_edges) = self.project.canvas_mut().remove_node(id)?;
+        self.record(ChangeOp::RemoveNode {
+            removed_edges,
+            stub: Box::new(node.stub),
+            meta: node.meta,
+            id,
+        });
+        Ok(())
+    }
+
+    pub fn add_edge(&mut self, edge: base::canvas::Edge) {
+        let op = ChangeOp::AddEdge { edge };
+        let outcome_op = op.apply(self);
+        self.record(outcome_op);
+    }
+
+    pub fn remove_edge(&mut self, edge: base::canvas::Edge) -> Result<(), EdgeNotFoundError> {
+        self.project.canvas_mut().remove_edge(edge)?;
+        self.record(ChangeOp::RemoveEdge { edge });
+        Ok(())
+    }
+
+    pub fn patch_node_meta(
+        &mut self,
+        node_id: base::canvas::Id,
+        patch: serde_json::Value,
+    ) -> Result<(), NodeNotFoundError> {
+        let backup = {
+            let node = self
+                .project
+                .canvas_mut()
+                .node_mut(node_id)
+                .ok_or(NodeNotFoundError(node_id))?;
+            let backup = node.meta.clone();
+            json_patch::merge(&mut node.meta, &patch);
+            backup
+        };
+        self.record(ChangeOp::AlterNodeMetadata {
+            node_id,
+            patch,
+            backup,
+        });
+        Ok(())
     }
 }
 
@@ -446,69 +497,18 @@ pub enum ChangeOp {
         /// Node in which the metadata was changed.
         node_id: base::canvas::Id,
 
-        /// Values added to the metadata.
+        /// Values to (re)set in the metadata.
         ///
-        /// For edits, the value is the new value.
-        ///
-        /// If no additonal values were added, this should be `null`.
-        add: serde_json::Value,
+        /// For edits, the value is the new value intead of the existing one.
+        /// All null values in a map are removed from the metadata.
+        patch: serde_json::Value,
 
-        /// Values removed from the metadata.
-        ///
-        /// For edits, the value is the old value and is also thus present in `add` field.
-        ///
-        /// If no values were removed, this should be `null`.
-        remove: serde_json::Value,
+        /// Pre-patch values to revert the metadata back to the original state.
+        backup: serde_json::Value,
     },
 }
 
 impl ChangeOp {
-    /// Convert given operation into corresponding reverting operation(s).
-    pub fn into_inverted(self) -> SmallVec<[ChangeOp; 1]> {
-        use ChangeOp::*;
-        match self {
-            AddNode { stub, id, meta } => {
-                let op = RemoveNode {
-                    removed_edges: Vec::new(),
-                    stub,
-                    meta,
-                    id,
-                };
-                smallvec![op]
-            }
-            RemoveNode {
-                removed_edges,
-                meta,
-                stub,
-                id,
-            } => {
-                let mut vec = SmallVec::with_capacity(removed_edges.len() + 1);
-                vec.push(AddNode { stub, meta, id });
-                for edge in removed_edges {
-                    vec.push(AddEdge { edge });
-                }
-                vec
-            }
-            AddEdge { edge } => {
-                smallvec![RemoveEdge { edge }]
-            }
-            RemoveEdge { edge } => {
-                smallvec![AddEdge { edge }]
-            }
-            AlterNodeMetadata {
-                node_id,
-                add,
-                remove,
-            } => {
-                smallvec![AlterNodeMetadata {
-                    node_id,
-                    add: remove,
-                    remove: add,
-                }]
-            }
-        }
-    }
-
     /// Apply the change operation to the project, returning the resulting actual
     /// operation. Note that the operation can be different (with different params)
     /// than the original one, e.g. ID of the new node can change.
@@ -536,33 +536,12 @@ impl ChangeOp {
                 }
             }
             RemoveNode {
-                mut removed_edges,
+                removed_edges: _,
                 meta: _,
                 mut stub,
                 id,
             } => {
-                debug_assert!(
-                    removed_edges.is_empty(),
-                    "edges are filled in here, not expecting any"
-                );
-
-                let cnt = project
-                    .project
-                    .canvas()
-                    .node_edge_io_iter(id)
-                    .expect(EXPECT_FOUND_NODE)
-                    .count();
-                removed_edges.reserve(cnt);
-                for edge in project
-                    .project
-                    .canvas()
-                    .node_edge_io_iter(id)
-                    .expect(EXPECT_FOUND_NODE)
-                {
-                    removed_edges.push(edge);
-                }
-
-                let node = project
+                let (node, removed_edges) = project
                     .project
                     .canvas_mut()
                     .remove_node(id)
@@ -596,18 +575,23 @@ impl ChangeOp {
             }
             AlterNodeMetadata {
                 node_id,
-                add,
-                remove,
+                patch,
+                backup: _,
             } => {
-                let canvas = project.project.canvas_mut();
-                let node = canvas.node_mut(node_id).expect(EXPECT_FOUND_NODE);
-                json_patch::merge(&mut node.meta, &remove);
-                json_patch::merge(&mut node.meta, &add);
+                let meta = &mut project
+                    .project
+                    .canvas_mut()
+                    .node_mut(node_id)
+                    .expect(EXPECT_FOUND_NODE)
+                    .meta;
+                let backup = meta.clone();
+
+                json_patch::merge(meta, &patch);
 
                 AlterNodeMetadata {
                     node_id,
-                    add,
-                    remove,
+                    patch,
+                    backup,
                 }
             }
         }
@@ -622,9 +606,65 @@ impl ChangeOp {
     }
 
     /// Revert the change operation from the project.
-    /// Runs internally [ChangeOp::apply] with the inverted operation.
+    /// This is the opposite of [ChangeOp::apply].
     fn revert(self, project: &mut WorkSessionProject) {
-        Self::apply_all(self.into_inverted(), project);
+        use ChangeOp::*;
+
+        const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
+        const EXPECT_FOUND_EDGE: &str = "edge not found, though operation was recorded";
+
+        match self {
+            AddNode { id, .. } => {
+                project
+                    .project
+                    .canvas_mut()
+                    .remove_node(id)
+                    .expect(EXPECT_FOUND_NODE);
+            }
+            RemoveNode {
+                removed_edges,
+                stub,
+                meta,
+                id: _,
+            } => {
+                project.project.canvas_mut().add_node(*stub, meta);
+
+                for edge in removed_edges {
+                    project
+                        .project
+                        .canvas_mut()
+                        .add_edge(edge)
+                        .expect(EXPECT_FOUND_EDGE);
+                }
+            }
+            AddEdge { edge } => {
+                project
+                    .project
+                    .canvas_mut()
+                    .remove_edge(edge)
+                    .expect(EXPECT_FOUND_EDGE);
+            }
+            RemoveEdge { edge } => {
+                project
+                    .project
+                    .canvas_mut()
+                    .add_edge(edge)
+                    .expect(EXPECT_FOUND_EDGE);
+            }
+            AlterNodeMetadata {
+                node_id,
+                patch: _,
+                backup,
+            } => {
+                let meta = &mut project
+                    .project
+                    .canvas_mut()
+                    .node_mut(node_id)
+                    .expect(EXPECT_FOUND_NODE)
+                    .meta;
+                *meta = backup;
+            }
+        }
     }
 
     /// Revert all change operations in the iterator from the project.

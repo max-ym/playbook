@@ -67,11 +67,11 @@ impl Project {
         self.uuid
     }
 
-    pub fn canvas(&self) -> &base::canvas::Canvas<JsonValue> {
+    pub(crate) fn canvas(&self) -> &base::canvas::Canvas<JsonValue> {
         &self.canvas
     }
 
-    pub fn canvas_mut(&mut self) -> &mut base::canvas::Canvas<JsonValue> {
+    pub(crate) fn canvas_mut(&mut self) -> &mut base::canvas::Canvas<JsonValue> {
         &mut self.canvas
     }
 }
