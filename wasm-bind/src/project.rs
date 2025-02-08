@@ -670,7 +670,7 @@ impl JsNode {
     ///
     /// # Errors
     /// If the project or the node is no longer valid, this will return an error.
-    #[wasm_bindgen(js_name = stub)]
+    #[wasm_bindgen(getter, js_name = stub)]
     pub fn stub(&self) -> Result<JsNodeStub, JsError> {
         let ws = wsr!();
         let maybe_project = ws.project_by_id(self.project_uuid);
@@ -723,6 +723,7 @@ impl JsNode {
     }
 
     /// Get the node identifier.
+    #[wasm_bindgen(getter)]
     pub fn id(&self) -> u32 {
         self.node_id.get()
     }
@@ -776,7 +777,7 @@ impl JsNodeIter {
         })
     }
 
-    #[wasm_bindgen(js_name = isValid)]
+    #[wasm_bindgen(getter, js_name = isValid)]
     pub fn is_valid(&self) -> bool {
         let ws = wsr!();
         if let Some(p) = ws.project_by_id(self.project_uuid) {
