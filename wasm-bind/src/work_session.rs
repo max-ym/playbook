@@ -406,6 +406,7 @@ impl JsHistory {
 #[wasm_bindgen(js_name = ChangeItem)]
 pub struct JsChangeItem {
     /// Timestamp of the change.
+    /// It is used internally to verify the validity of the handle.
     #[wasm_bindgen(readonly)]
     pub timestamp: u64,
 
@@ -430,13 +431,26 @@ impl JsChangeItem {
     /// on it will result in an error.
     #[wasm_bindgen(getter, js_name = isValid)]
     pub fn is_valid(&self) -> bool {
-        todo!()
+        let ws = wsr!();
+        if let Some(project) = ws.project_by_id(self.project_uuid) {
+            if let Some(change) = project.change_at(self.position) {
+                change.micros_since_unix() as u64 == self.timestamp
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     /// Get the operation that was performed.
     /// This information is necessary to reflect the change in the UI.
     /// If the handle is invalid, this will return an error.
     pub fn operation(&self) -> Result<JsChangeOp, InvalidHandleError> {
+        if !self.is_valid() {
+            return Err(InvalidHandleError);
+        }
+
         todo!()
     }
 }
@@ -623,14 +637,6 @@ impl ChangeOp {
         }
     }
 
-    /// Apply all change operations in the iterator to the project.
-    /// See [ChangeOp::apply] for more details.
-    fn apply_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
-        for op in iter {
-            op.apply(project);
-        }
-    }
-
     /// Revert the change operation from the project.
     /// This is the opposite of [ChangeOp::apply].
     fn revert(self, project: &mut WorkSessionProject) {
@@ -690,14 +696,6 @@ impl ChangeOp {
                     .meta;
                 *meta = backup;
             }
-        }
-    }
-
-    /// Revert all change operations in the iterator from the project.
-    /// See [ChangeOp::revert] for more details.
-    fn revert_all(iter: impl IntoIterator<Item = ChangeOp>, project: &mut WorkSessionProject) {
-        for op in iter {
-            op.revert(project);
         }
     }
 }

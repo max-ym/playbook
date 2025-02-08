@@ -1,5 +1,5 @@
 use js_sys::JsString;
-use wasm_bindgen::{prelude::*, JsCast, JsValue};
+use wasm_bindgen::prelude::*;
 
 pub mod work_session;
 
@@ -12,20 +12,6 @@ pub mod vcs;
 /// and the session is in an invalid state.
 const WORK_SESSION_POISONED: &str =
     "work session is poisoned (unexpected crash happened in WASM), reload required";
-
-/// Error for failure to reconstruct a type from a JS value.
-pub enum TypeReconstructionError {
-    MissingField(&'static str),
-    InvalidType(&'static str),
-    UnexpectedVariant(&'static str),
-}
-
-impl TypeReconstructionError {
-    pub fn ensure_string(js: JsValue) -> Result<JsString, TypeReconstructionError> {
-        js.dyn_into()
-            .map_err(|_| TypeReconstructionError::InvalidType("String"))
-    }
-}
 
 #[wasm_bindgen]
 pub struct InvalidHandleError;
