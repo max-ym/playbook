@@ -2,8 +2,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base::canvas::{EdgeNotFoundError, NodeNotFoundError};
+use base::canvas;
 use base::valid::Validated;
+use canvas::{EdgeNotFoundError, NodeNotFoundError};
+use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
@@ -14,27 +16,32 @@ static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
 #[macro_export]
 macro_rules! wsr {
-    () => {
+    () => {{
+        log::trace!("read-lock work session singleton");
         crate::work_session::work_session()
             .read()
             .expect(crate::WORK_SESSION_POISONED)
-    };
+    }};
 }
 pub use wsr;
 
 #[macro_export]
 macro_rules! wsw {
-    () => {
+    () => {{
+        log::trace!("write-lock work session singleton");
         crate::work_session::work_session()
             .write()
             .expect(crate::WORK_SESSION_POISONED)
-    };
+    }};
 }
 pub use wsw;
 
 /// Access current work session lock.
 pub fn work_session() -> &'static RwLock<WorkSession> {
-    WORK_SESSION.get_or_init(|| RwLock::new(WorkSession::new()))
+    WORK_SESSION.get_or_init(|| {
+        let _ = console_log::init();
+        RwLock::new(WorkSession::new())
+    })
 }
 
 /// Work session that contains all the projects and their history loaded into the
@@ -150,8 +157,10 @@ impl WorkSessionProject {
     /// If there are no changes to undo, returns `None`.
     pub fn undo(&mut self) -> Option<usize> {
         if self.changes.pos == 0 {
+            debug!("no changes to undo");
             return None;
         }
+        trace!("undoing change");
 
         self.require_revalidate();
 
@@ -166,8 +175,10 @@ impl WorkSessionProject {
     /// If there are no changes to redo, returns `None`.
     pub fn redo(&mut self) -> Option<usize> {
         if self.changes.pos == self.changes.stack.len() {
+            debug!("no changes to redo");
             return None;
         }
+        trace!("redoing change");
 
         self.require_revalidate();
 
@@ -183,17 +194,25 @@ impl WorkSessionProject {
     /// the change). If the passed position is out of bounds, this is no-op and returns `None`.
     pub fn goto(&mut self, pos: usize) -> Option<usize> {
         if pos >= self.changes.stack.len() {
+            debug!(
+                "change stack position out of bounds ({pos} >= {})",
+                self.changes.stack.len()
+            );
             return None;
         }
 
         if pos < self.changes.pos {
+            trace!("going back to change at position {pos}");
             while self.changes.pos != pos {
                 self.undo();
             }
         } else if pos > self.changes.pos {
+            trace!("going forward to change at position {pos}");
             while self.changes.pos != pos {
                 self.redo();
             }
+        } else {
+            debug!("`goto` op on history stack found itself already at position {pos}");
         }
 
         Some(self.changes.pos)
@@ -221,6 +240,7 @@ impl WorkSessionProject {
 
     /// Record given change operation to the project history.
     fn record(&mut self, op: ChangeOp) {
+        trace!("record change operation to the project history: {op:#?}");
         self.changes.stack.truncate(self.changes.pos);
         self.changes.stack.push(ChangeItem {
             timestamp: std::time::SystemTime::now(),
@@ -231,14 +251,12 @@ impl WorkSessionProject {
 
     /// Mark the project as requiring revalidation.
     fn require_revalidate(&mut self) {
+        trace!("project requires revalidation");
         self.revalidate = true;
     }
 
-    pub fn add_node(
-        &mut self,
-        stub: base::canvas::NodeStub,
-        meta: serde_json::Value,
-    ) -> base::canvas::Id {
+    pub fn add_node(&mut self, stub: canvas::NodeStub, meta: serde_json::Value) -> canvas::Id {
+        trace!("add node to the project: {stub:#?}, {meta:#?}");
         self.require_revalidate();
         let id = self
             .project
@@ -252,7 +270,8 @@ impl WorkSessionProject {
         id
     }
 
-    pub fn remove_node(&mut self, id: base::canvas::Id) -> Result<(), NodeNotFoundError> {
+    pub fn remove_node(&mut self, id: canvas::Id) -> Result<(), NodeNotFoundError> {
+        trace!("remove node {id} from the project");
         let (node, removed_edges) = self.project.canvas_mut().remove_node(id)?;
         self.require_revalidate();
         self.record(ChangeOp::RemoveNode {
@@ -264,14 +283,16 @@ impl WorkSessionProject {
         Ok(())
     }
 
-    pub fn add_edge(&mut self, edge: base::canvas::Edge) -> Result<(), NodeNotFoundError> {
+    pub fn add_edge(&mut self, edge: canvas::Edge) -> Result<(), NodeNotFoundError> {
+        trace!("add edge {edge} to the project");
         self.require_revalidate();
         self.project.canvas_mut().add_edge(edge)?;
         self.record(ChangeOp::AddEdge { edge });
         Ok(())
     }
 
-    pub fn remove_edge(&mut self, edge: base::canvas::Edge) -> Result<(), EdgeNotFoundError> {
+    pub fn remove_edge(&mut self, edge: canvas::Edge) -> Result<(), EdgeNotFoundError> {
+        trace!("remove edge {edge} from the project");
         self.project.canvas_mut().remove_edge(edge)?;
         self.require_revalidate();
         self.record(ChangeOp::RemoveEdge { edge });
@@ -280,9 +301,10 @@ impl WorkSessionProject {
 
     pub fn patch_node_meta(
         &mut self,
-        node_id: base::canvas::Id,
+        node_id: canvas::Id,
         patch: serde_json::Value,
     ) -> Result<(), NodeNotFoundError> {
+        trace!("patch metadata of node {node_id} in the project: {patch:#?}");
         let backup = {
             let node = self
                 .project
@@ -302,7 +324,8 @@ impl WorkSessionProject {
     }
 
     /// Get the known data type of the pin. [None] if the pin type is not known.
-    pub fn pin_data_type(&self, pin: base::canvas::Pin) -> Option<&base::canvas::PrimitiveType> {
+    pub fn pin_data_type(&self, pin: canvas::Pin) -> Option<&canvas::PrimitiveType> {
+        trace!("get data type of pin {pin}");
         let valid = self.valid.as_ref()?;
         valid.ty(pin)
     }
@@ -339,6 +362,7 @@ impl JsWorkSession {
     /// recovered by switching back to the previous project.
     #[wasm_bindgen(js_name = switchCurrentProject)]
     pub fn switch_current_project(&self, project: project::JsProject) -> Result<(), JsError> {
+        trace!("switch current project to {}", project.uuid);
         let mut ws = wsw!();
         ws.switch_current_project(project.uuid)
             .map_err(|_| JsError::new("Project not found"))
@@ -355,6 +379,7 @@ impl JsWorkSession {
     #[wasm_bindgen(getter, js_name = isServerSaved)]
     pub fn is_server_saved() -> bool {
         if cfg!(feature = "fake_server") {
+            warn!("fake server mode always returns false on `isServerSaved`");
             return false;
         }
 
@@ -374,6 +399,7 @@ impl JsWorkSession {
     #[wasm_bindgen(js_name = saveToServer)]
     pub async fn save_to_server(&self) -> Result<(), JsError> {
         if cfg!(feature = "fake_server") {
+            warn!("fake server mode always throws an error on `saveToServer`");
             return Err(JsError::new(
                 "Fake server mode throws an error on save attempt",
             ));
@@ -488,9 +514,11 @@ impl JsChangeItem {
             if let Some(change) = project.change_at(self.position) {
                 change.micros_since_unix() as u64 == self.timestamp
             } else {
+                debug!("js change item - change not found in the project");
                 false
             }
         } else {
+            debug!("js change item - project not found in the work session");
             false
         }
     }
@@ -500,6 +528,7 @@ impl JsChangeItem {
     /// If the handle is invalid, this will return an error.
     pub fn operation(&self) -> Result<JsChangeOp, InvalidHandleError> {
         if !self.is_valid() {
+            error!("js change item - use of invalid handle");
             return Err(InvalidHandleError);
         }
 
@@ -576,29 +605,29 @@ impl ChangeItem {
 pub enum ChangeOp {
     /// Add a node to the canvas.
     AddNode {
-        stub: Box<base::canvas::NodeStub>,
+        stub: Box<canvas::NodeStub>,
         meta: serde_json::Value,
-        id: base::canvas::Id,
+        id: canvas::Id,
     },
 
     /// Remove a node from the canvas.
     RemoveNode {
-        removed_edges: Vec<base::canvas::Edge>,
-        stub: Box<base::canvas::NodeStub>,
+        removed_edges: Vec<canvas::Edge>,
+        stub: Box<canvas::NodeStub>,
         meta: serde_json::Value,
-        id: base::canvas::Id,
+        id: canvas::Id,
     },
 
     /// Add an edge to the canvas.
-    AddEdge { edge: base::canvas::Edge },
+    AddEdge { edge: canvas::Edge },
 
     /// Remove an edge from the canvas.
-    RemoveEdge { edge: base::canvas::Edge },
+    RemoveEdge { edge: canvas::Edge },
 
     /// Alter metadata of a node.
     AlterNodeMetadata {
         /// Node in which the metadata was changed.
-        node_id: base::canvas::Id,
+        node_id: canvas::Id,
 
         /// Values to (re)set in the metadata.
         ///
