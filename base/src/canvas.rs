@@ -69,6 +69,10 @@ impl<NodeMeta> Canvas<NodeMeta> {
             .map(move |idx| &mut self.nodes[idx as usize])
     }
 
+    pub fn node_by_idx(&self, idx: NodeIdx) -> Option<&Node<NodeMeta>> {
+        self.nodes.get(idx as usize)
+    }
+
     pub fn root_nodes_inner(&self) -> impl Iterator<Item = NodeIdx> + '_ {
         self.root_nodes.iter().map(move |&id| {
             self.node_id_to_idx(id)

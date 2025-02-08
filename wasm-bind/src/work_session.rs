@@ -1,6 +1,6 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{OnceLock, RwLock};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base::canvas::{EdgeNotFoundError, NodeNotFoundError};
 use smallvec::SmallVec;
@@ -14,7 +14,9 @@ static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 #[macro_export]
 macro_rules! wsr {
     () => {
-        crate::work_session::work_session().read().expect(crate::WORK_SESSION_POISONED)
+        crate::work_session::work_session()
+            .read()
+            .expect(crate::WORK_SESSION_POISONED)
     };
 }
 pub use wsr;
@@ -22,7 +24,9 @@ pub use wsr;
 #[macro_export]
 macro_rules! wsw {
     () => {
-        crate::work_session::work_session().write().expect(crate::WORK_SESSION_POISONED)
+        crate::work_session::work_session()
+            .write()
+            .expect(crate::WORK_SESSION_POISONED)
     };
 }
 pub use wsw;
@@ -189,6 +193,21 @@ impl WorkSessionProject {
         self.changes.stack.get(pos)
     }
 
+    /// Detect changes in the stack of changes. This is used to detect if the project
+    /// was changed since some state, either because of new operations, or because
+    /// of undo/redo operations.
+    pub fn detect_changed_stack(&self) -> DetectChangedStack {
+        DetectChangedStack {
+            pos: self.changes.pos,
+            time: self
+                .changes
+                .stack
+                .last()
+                .map(|c| c.timestamp)
+                .unwrap_or(SystemTime::now()),
+        }
+    }
+
     /// Record given change operation to the project history.
     fn record(&mut self, op: ChangeOp) {
         self.changes.stack.truncate(self.changes.pos);
@@ -199,14 +218,21 @@ impl WorkSessionProject {
         self.changes.pos += 1;
     }
 
-    pub fn add_node(&mut self, stub: base::canvas::NodeStub, meta: serde_json::Value) {
-        let op = ChangeOp::AddNode {
+    pub fn add_node(
+        &mut self,
+        stub: base::canvas::NodeStub,
+        meta: serde_json::Value,
+    ) -> base::canvas::Id {
+        let id = self
+            .project
+            .canvas_mut()
+            .add_node(stub.clone(), meta.clone());
+        self.record(ChangeOp::AddNode {
             stub: Box::new(stub),
             meta,
-            id: base::canvas::Id::ZERO,
-        };
-        let outcome_op = op.apply(self);
-        self.record(outcome_op);
+            id,
+        });
+        id
     }
 
     pub fn remove_node(&mut self, id: base::canvas::Id) -> Result<(), NodeNotFoundError> {
@@ -489,6 +515,17 @@ impl ChangeStack {
             pos: 0,
         }
     }
+}
+
+/// Detect changes in the stack of changes. This is used to detect if the project
+/// was changed since some state.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DetectChangedStack {
+    /// Position in the history stack.
+    pos: usize,
+
+    /// Timestamp of the last change.
+    time: std::time::SystemTime,
 }
 
 pub struct ChangeItem {

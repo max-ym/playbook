@@ -1,4 +1,5 @@
 use js_sys::JsString;
+use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
 pub mod work_session;
@@ -13,7 +14,9 @@ pub mod vcs;
 const WORK_SESSION_POISONED: &str =
     "work session is poisoned (unexpected crash happened in WASM), reload required";
 
+#[derive(Debug, Error)]
 #[wasm_bindgen]
+#[error("handle is invalid and can't access the original object")]
 pub struct InvalidHandleError;
 
 trait MyUuid {
