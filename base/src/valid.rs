@@ -33,13 +33,13 @@ pub struct Typed<'canvas> {
 
 impl Typed<'_> {
     /// Special type index for unresolved types.
-    const UNRESOLVER_TYPE: usize = usize::MAX;
+    const UNRESOLVED_TYPE: usize = usize::MAX;
 
     /// Whether all the nodes in the canvas have fully resolved types.
     pub fn is_fully_resolved(&self) -> bool {
         self.nodes
             .iter()
-            .all(|node| node.iter().all(|&ty| ty != Self::UNRESOLVER_TYPE))
+            .all(|node| node.iter().all(|&ty| ty != Self::UNRESOLVED_TYPE))
     }
 }
 
@@ -65,7 +65,7 @@ impl<'canvas, T> Canvas<T> {
             .ok_or(PinNotFound(pin.to_owned()))?
             .to_owned();
 
-        if idx == Typed::UNRESOLVER_TYPE {
+        if idx == Typed::UNRESOLVED_TYPE {
             Ok(None)
         } else {
             Ok(typed.types.get(idx))
@@ -607,7 +607,7 @@ impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
                 self.node_to_pins.push(PinMap {
                     node_idx: node_idx as canvas::NodeIdx,
                     pin: pin as canvas::PinOrder,
-                    map_idx: Typed::UNRESOLVER_TYPE,
+                    map_idx: Typed::UNRESOLVED_TYPE,
                 });
             }
         }
@@ -620,12 +620,12 @@ impl<'validator, 'canvas: 'validator, T> Resolver<'validator, 'canvas, T> {
             let result_to = self.node_to_pins.binary_search(&PinMap {
                 node_idx: edge.to.0,
                 pin: edge.to.1,
-                map_idx: Typed::UNRESOLVER_TYPE,
+                map_idx: Typed::UNRESOLVED_TYPE,
             });
             let result_from = self.node_to_pins.binary_search(&PinMap {
                 node_idx: edge.from.0,
                 pin: edge.from.1,
-                map_idx: Typed::UNRESOLVER_TYPE,
+                map_idx: Typed::UNRESOLVED_TYPE,
             });
 
             match (result_to, result_from) {
