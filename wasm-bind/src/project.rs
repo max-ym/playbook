@@ -2,13 +2,25 @@ use std::collections::HashMap;
 
 use base::table_data;
 use chrono::Datelike;
-use js_sys::{RegExp, Uint8Array};
+use js_sys::{JsString, RegExp, Uint8Array};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
 use serde_json::Value as JsonValue;
+use wasm_bindgen::prelude::*;
 
-use crate::{work_session::work_session, *};
+use crate::{MyUuid, PermissionError};
+
+macro_rules! wsr {
+    () => {
+        crate::work_session::work_session().read().unwrap()
+    };
+}
+macro_rules! wsw {
+    () => {
+        crate::work_session::work_session().write().unwrap()
+    };
+}
 
 pub struct Project {
     name: JsString,
@@ -78,8 +90,7 @@ impl JsProject {
     /// as long as the user has permission to view the project at least read-only.
     #[wasm_bindgen(getter, js_name = files)]
     pub fn get_files(&self) -> Vec<JsProjectFile> {
-        let ws = work_session::work_session().read().unwrap();
-
+        let ws = wsr!();
         let project = if let Some(project) = ws.project_by_id(self.uuid) {
             project
         } else {
@@ -105,17 +116,28 @@ impl JsProject {
     /// Get the name of the project.
     #[wasm_bindgen(getter, js_name = name)]
     pub fn get_name(&self) -> JsString {
-        let ws = work_session::work_session().read().unwrap();
-        let project = ws.project_by_id(self.uuid).unwrap();
-        project.name().clone()
+        let ws = wsr!();
+        let project = ws.project_by_id(self.uuid);
+        if let Some(project) = project {
+            project.name().clone()
+        } else {
+            // Project not found. Was removed from work session. This handle is invalid.
+            // We return an empty string.
+            JsString::from("")
+        }
     }
 
     /// Set the new name for the project.
     #[wasm_bindgen(setter, js_name = name)]
     pub fn set_name(&mut self, name: JsString) {
-        let mut ws = work_session::work_session().write().unwrap();
-        let project = ws.project_by_id_mut(self.uuid).unwrap();
-        project.name = name;
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.uuid);
+        if let Some(project) = project {
+            project.name = name;
+        } else {
+            // Project not found. Was removed from work session. This handle is invalid.
+            // We do nothing.
+        }
     }
 
     /// Load the project with the given identifier, as returned by listing request.
@@ -127,8 +149,7 @@ impl JsProject {
     /// in the work session already.
     pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
         if cfg!(feature = "fake_server") {
-            let ws = work_session::work_session();
-            let mut ws = ws.write().unwrap();
+            let mut ws = wsw!();
             let uuid = Uuid::parse_str(&String::from(identifier))
                 .map_err(|_| ProjectLoadError::NotFound)?;
             let project = ws.project_by_id_mut(uuid);
@@ -585,7 +606,7 @@ impl JsNode {
     /// If the project or the node is no longer valid, this will return an error.
     #[wasm_bindgen(js_name = stub)]
     pub fn stub(&self) -> Result<JsNodeStub, JsError> {
-        let ws = work_session().read().unwrap();
+        let ws = wsr!();
         let maybe_project = ws.project_by_id(self.project_uuid);
         if let Some(project) = maybe_project {
             if let Some(node) = project.canvas().node(self.node_id) {
@@ -601,7 +622,7 @@ impl JsNode {
     /// Get the output pin at the given position.
     #[wasm_bindgen(js_name = outAt)]
     pub fn out_at(&self, position: u32) -> Result<JsNodePin, JsError> {
-        let ws = work_session().read().unwrap();
+        let ws = wsr!();
         let project = ws
             .project_by_id(self.project_uuid)
             .ok_or_else(|| JsError::new("Project not found"))?;
@@ -1294,7 +1315,7 @@ impl JsFileBuilder {
         let any_error =
             missing_name || missing_bytes || missing_protect_read || missing_protect_delete;
 
-        let mut ws = work_session::work_session().write().unwrap();
+        let mut ws = wsw!();
         let project = ws.project_by_id_mut(project.uuid);
         if let Some(project) = project {
             if any_error {
