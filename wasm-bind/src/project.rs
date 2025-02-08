@@ -10,18 +10,7 @@ use uuid::Uuid;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 
-use crate::{MyUuid, PermissionError};
-
-macro_rules! wsr {
-    () => {
-        crate::work_session::work_session().read().unwrap()
-    };
-}
-macro_rules! wsw {
-    () => {
-        crate::work_session::work_session().write().unwrap()
-    };
-}
+use crate::{MyUuid, PermissionError, work_session::wsw, work_session::wsr};
 
 pub struct Project {
     name: JsString,
@@ -747,7 +736,7 @@ impl JsNodePin {
 
     /// Get the position of the pin on the node.
     #[wasm_bindgen(getter)]
-    pub fn ordinal(&self) -> u32 {
+    pub fn ordinal(&self) -> base::canvas::PinOrder {
         self.ordinal
     }
 

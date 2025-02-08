@@ -1,3 +1,4 @@
+use std::ops::{Deref, DerefMut};
 use std::sync::{OnceLock, RwLock};
 use std::time::UNIX_EPOCH;
 
@@ -9,6 +10,22 @@ use crate::project::Project;
 use crate::*;
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
+
+#[macro_export]
+macro_rules! wsr {
+    () => {
+        crate::work_session::work_session().read().expect(crate::WORK_SESSION_POISONED)
+    };
+}
+pub use wsr;
+
+#[macro_export]
+macro_rules! wsw {
+    () => {
+        crate::work_session::work_session().write().expect(crate::WORK_SESSION_POISONED)
+    };
+}
+pub use wsw;
 
 /// Access current work session lock.
 pub fn work_session() -> &'static RwLock<WorkSession> {
@@ -102,6 +119,20 @@ pub struct WorkSessionProject {
     changes: ChangeStack,
 }
 
+impl Deref for WorkSessionProject {
+    type Target = Project;
+
+    fn deref(&self) -> &Self::Target {
+        &self.project
+    }
+}
+
+impl DerefMut for WorkSessionProject {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.project
+    }
+}
+
 impl WorkSessionProject {
     /// Undo the last change.
     /// Returns the position of the undone change in the history stack.
@@ -156,11 +187,6 @@ impl WorkSessionProject {
     /// Get the change at a specific position in the history stack.
     pub fn change_at(&self, pos: usize) -> Option<&ChangeItem> {
         self.changes.stack.get(pos)
-    }
-
-    /// Get the UUID of the project.
-    pub fn uuid(&self) -> Uuid {
-        self.project.uuid()
     }
 
     /// Record given change operation to the project history.
