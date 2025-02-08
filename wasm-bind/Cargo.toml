@@ -15,19 +15,6 @@ crate-type = ["cdylib", "rlib"]
 lto = "thin"
 incremental = false
 
-[profile.stage.package."*"]
-extend = "release"
-
-[profile.stage.package.base]
-extend = "release"
-debug = true
-debug-assertions = true
-
-[profile.stage.package.wasm-bind]
-extend = "release"
-debug = true
-debug-assertions = true
-
 [dependencies]
 js-sys = "0.3"
 log = "0.4"

@@ -1,5 +1,14 @@
 [workspace]
 resolver = "2"
-members = [ "base",
-    "wasm-bind",
-]
+members = ["base", "wasm-bind"]
+
+[profile.stage]
+inherits = "release"
+
+[profile.stage.package.base]
+debug = true
+debug-assertions = true
+
+[profile.stage.package.wasm-bind]
+debug = true
+debug-assertions = true
