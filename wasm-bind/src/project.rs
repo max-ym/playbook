@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use base::table_data;
 use chrono::Datelike;
 use js_sys::{JsString, RegExp, Uint8Array};
+use log::error;
 use smallvec::SmallVec;
 use uuid::Uuid;
 
@@ -94,8 +95,7 @@ impl JsProject {
         let project = if let Some(project) = ws.project_by_id(self.uuid) {
             project
         } else {
-            // Project not found. Was removed from work session. This handle is invalid.
-            // We return no files.
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
             return Vec::new();
         };
 
@@ -121,8 +121,7 @@ impl JsProject {
         if let Some(project) = project {
             project.name().clone()
         } else {
-            // Project not found. Was removed from work session. This handle is invalid.
-            // We return an empty string.
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
             JsString::from("")
         }
     }
@@ -135,8 +134,7 @@ impl JsProject {
         if let Some(project) = project {
             project.name = name;
         } else {
-            // Project not found. Was removed from work session. This handle is invalid.
-            // We do nothing.
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
         }
     }
 
@@ -149,15 +147,17 @@ impl JsProject {
     /// in the work session already.
     pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
         if cfg!(feature = "fake_server") {
+            let identifier = String::from(identifier);
             let mut ws = wsw!();
-            let uuid = Uuid::parse_str(&String::from(identifier))
-                .map_err(|_| ProjectLoadError::NotFound)?;
+
+            let uuid = Uuid::parse_str(&identifier).map_err(|_| ProjectLoadError::NotFound)?;
             let project = ws.project_by_id_mut(uuid);
             if let Some(project) = project {
                 Ok(JsProject {
                     uuid: project.uuid(),
                 })
             } else {
+                error!("Failed to load project by identifier `{identifier}`");
                 Err(ProjectLoadError::NotFound)
             }
         } else {
@@ -194,8 +194,21 @@ pub struct JsCanvas {
 impl JsCanvas {
     /// Add a new node to the canvas.
     #[wasm_bindgen(js_name = addNode)]
-    pub fn add_node(&mut self, node: JsNodeStub) -> JsNode {
-        todo!()
+    pub fn add_node(&mut self, node: JsNodeStub, meta: JsValue) -> Result<JsNode, JsError> {
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.project_uuid);
+        if let Some(project) = project {
+            let meta =
+                serde_wasm_bindgen::from_value(meta).map_err(|e| JsError::new(&e.to_string()))?;
+            let node = project.canvas_mut().add_node(node.stub.into(), meta);
+            Ok(JsNode {
+                project_uuid: self.project_uuid,
+                node_id: node,
+            })
+        } else {
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
+            Err(JsError::new("Project not found, handle is invalid"))
+        }
     }
 
     /// Get iterator over nodes in this canvas.
@@ -208,7 +221,10 @@ impl JsCanvas {
     /// should not have this iterator around while modifying the canvas.
     #[wasm_bindgen(js_name = nodeIterator)]
     pub fn node_iter(&self) -> JsNodeIter {
-        todo!()
+        JsNodeIter {
+            project_uuid: self.project_uuid,
+            pos: 0,
+        }
     }
 }
 
@@ -644,7 +660,15 @@ impl JsNode {
     /// Get the input pin at the given position.
     #[wasm_bindgen(js_name = inAt)]
     pub fn in_at(&self, position: u32) -> Option<JsNodePin> {
-        todo!()
+        let ws = wsr!();
+        let project = ws.project_by_id(self.project_uuid)?;
+        let node = project.canvas().node(self.node_id)?;
+        let ordinal = node.stub.real_input_pin_idx(position as _)?;
+        Some(JsNodePin {
+            project_uuid: self.project_uuid,
+            node_id: self.node_id,
+            ordinal,
+        })
     }
 
     /// Get the node identifier.
@@ -653,8 +677,20 @@ impl JsNode {
     }
 
     /// Drop the node from the canvas. You should not use the node handle after this.
-    pub fn drop(self) -> JsNodeStub {
-        todo!()
+    /// 
+    /// This also returns the stub of the node, so you can recreate it later.
+    pub fn drop(self) -> Result<JsNodeStub, JsError> {
+        let stub = self.stub()?;
+
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.project_uuid);
+        if let Some(project) = project {
+            project.canvas_mut().remove_node(self.node_id);
+            Ok(stub)
+        } else {
+            error!("Project not found. Was removed from work session. Project handle is invalid.");
+            Err(JsError::new("Project not found, handle is invalid"))
+        }
     }
 }
 
@@ -682,7 +718,7 @@ impl JsNodeIter {
 pub struct JsNodePin {
     project_uuid: Uuid,
     node_id: base::canvas::Id,
-    ordinal: u32,
+    ordinal: base::canvas::PinOrder,
 }
 
 #[wasm_bindgen(js_class = NodePin)]
