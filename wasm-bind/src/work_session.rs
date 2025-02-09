@@ -117,10 +117,34 @@ impl WorkSession {
         self.current_project_idx = idx;
         Ok(())
     }
+
+    /// Add new project to the work session.
+    pub fn add_project(&mut self, project: Project) -> Result<(), ProjectExistsError> {
+        let uuid = project.uuid();
+        if self.project_by_id(uuid).is_some() {
+            return Err(ProjectExistsError(uuid));
+        }
+
+        self.projects.push(WorkSessionProject {
+            project,
+            changes: ChangeStack::new(),
+            valid: None,
+            revalidate: false,
+        });
+
+        Ok(())
+    }
 }
 
-#[derive(Debug)]
+/// Error when trying to access a project that is not loaded into the work session.
+#[derive(Debug, Error)]
+#[error("project not found in the work session")]
 pub struct ProjectNotFoundError;
+
+/// Error when trying to add a project that already exists in the work session.
+#[derive(Debug, Error)]
+#[error("project already exists in the work session by UUID {0}")]
+pub struct ProjectExistsError(pub Uuid);
 
 /// A project in the work session. This contains the project data and the history stack of changes.
 pub struct WorkSessionProject {

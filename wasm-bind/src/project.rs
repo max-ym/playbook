@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    work_session::{wsr, wsw, DetectChangedStack},
+    work_session::{self, wsr, wsw, DetectChangedStack},
     InvalidHandleError, MyUuid, PermissionError,
 };
 
@@ -25,6 +25,16 @@ pub struct Project {
 }
 
 impl Project {
+    pub fn zero() -> Self {
+        Self {
+            name: JsString::from("Unnamed"),
+            canvas: canvas::Canvas::new(),
+            data: SmallVec::new(),
+            files: SmallVec::new(),
+            uuid: Uuid::nil(),
+        }
+    }
+
     pub fn name(&self) -> &JsString {
         &self.name
     }
@@ -133,24 +143,23 @@ impl JsProject {
 
     /// Load the project with the given identifier, as returned by listing request.
     ///
-    /// This will throw ProjectLoadError if the project cannot be loaded.
+    /// # Errors
+    /// This will throw ProjectLoadError if the project cannot be loaded, or already exists
+    /// in the current work session.
     ///
     /// # Fake Server
-    /// Returns a project handle for this identifier if such project exists
-    /// in the work session already.
+    /// UUID 0 allows to load empty project as if it was loaded from the server.
     pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
-        if cfg!(feature = "fake_server") {
-            let identifier = String::from(identifier);
-            let mut ws = wsw!();
+        let identifier = String::from(identifier);
+        let uuid = Uuid::parse_str(&identifier).map_err(|_| ProjectLoadError::InvalidUuid)?;
 
-            let uuid = Uuid::parse_str(&identifier).map_err(|_| ProjectLoadError::NotFound)?;
-            let project = ws.project_by_id_mut(uuid);
-            if let Some(project) = project {
-                Ok(JsProject {
-                    uuid: project.uuid(),
-                })
+        if cfg!(feature = "fake_server") {
+            if uuid == Uuid::nil() {
+                let mut ws = wsw!();
+                ws.add_project(Project::zero())?;
+                Ok(JsProject { uuid })
             } else {
-                error!("Failed to load project by identifier `{identifier}`");
+                error!("Failed to load fake server project by identifier `{identifier}`");
                 Err(ProjectLoadError::NotFound)
             }
         } else {
@@ -170,10 +179,19 @@ impl JsProject {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = ProjectLoadError)]
 pub enum ProjectLoadError {
+    /// Given UUID cannot be parsed or is invalid.
+    InvalidUuid,
+    AlreadyLoaded,
     NotFound,
     PermissionError,
     RequestError,
     ServerError,
+}
+
+impl From<work_session::ProjectExistsError> for ProjectLoadError {
+    fn from(_: work_session::ProjectExistsError) -> Self {
+        ProjectLoadError::AlreadyLoaded
+    }
 }
 
 /// Canvas of the project. This is where the nodes are placed.
@@ -984,8 +1002,8 @@ impl JsDataInstance {
     /// Get the value as a JS value.
     #[wasm_bindgen(getter)]
     pub fn value(&self) -> JsValue {
-        use canvas::Value::*;
         use bigdecimal::ToPrimitive;
+        use canvas::Value::*;
         use chrono::Timelike;
         use std::cmp::Ordering;
         use std::ops::Deref;
