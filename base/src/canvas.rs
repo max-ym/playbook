@@ -381,7 +381,9 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
         trace!("remove edges that are no longer valid");
         let mut vec = SmallVec::<[EdgeIdx; 128]>::new();
-        let (inp, _) = self.node_edge_io_ranges(node_id).expect("we found the node in this call already");
+        let (inp, _) = self
+            .node_edge_io_ranges(node_id)
+            .expect("we found the node in this call already");
         for edge_idx in inp {
             let edge = &self.edges[edge_idx as usize];
             if range.contains(&edge.to.order) {
