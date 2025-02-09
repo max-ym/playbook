@@ -1,6 +1,6 @@
 use std::{
     fmt::{Display, Formatter},
-    ops::{Deref, RangeInclusive},
+    ops::{Deref, DerefMut, RangeInclusive},
 };
 
 use bigdecimal::BigDecimal;
@@ -161,6 +161,36 @@ impl<NodeMeta> Canvas<NodeMeta> {
         Some((&self.edges[inp], &self.edges[out]))
     }
 
+    fn node_edge_io_slices_mut(&mut self, node_id: Id) -> Option<(&mut [Edge], &mut [Edge])> {
+        let (inp, out) = self.node_edge_io_ranges(node_id)?;
+        let (i, o) = {
+            let reversed = if inp.start() < out.start() {
+                false
+            } else {
+                true
+            };
+            macro_rules! calc {
+                ($low:expr, $high:expr) => {{
+                    let (a, rest) = self.edges.split_at_mut(*$low.start());
+                    let (_, b) = rest.split_at_mut($high.end() + 1 - $low.start());
+
+                    let a_len = $high.end() - $high.start() + 1;
+                    let b_len = $low.end() - $low.start() + 1;
+                    (&mut a[0..a_len], &mut b[0..b_len])
+                }};
+            }
+            if reversed {
+                // input > output
+                let (a, b) = calc!(out, inp);
+                (b, a)
+            } else {
+                // output > input
+                calc!(inp, out)
+            }
+        };
+        Some((i, o))
+    }
+
     /// Iterator over all edges connected to the node.
     /// Returns [None] if the node does not exist.
     pub fn node_edge_io_iter(&self, node_id: Id) -> Option<impl Iterator<Item = Edge> + '_> {
@@ -279,6 +309,129 @@ impl<NodeMeta> Canvas<NodeMeta> {
             .ok()
             .map(|idx| &self.predicates[idx].imp)
     }
+
+    /// Add more input pins to the node.
+    /// Moving existing edges accordingly, if necessary.
+    /// Range defines the range of pins to add. Range should be within the existing input
+    /// pins range of the node, or just after the last pin.
+    pub fn add_node_input(
+        &mut self,
+        node_id: Id,
+        range: std::ops::Range<PinOrder>,
+    ) -> Result<(), ChangePinCountError> {
+        let node = self.node_mut(node_id).ok_or(NodeNotFoundError(node_id))?;
+
+        trace!("calculate extra pin count to add to node {node_id} for added pin range {range:?}");
+        let new_count = {
+            let current = node.stub.input_pin_count();
+            let start = range.start;
+
+            if start > current {
+                return Err(ChangePinCountError::InvalidRange(range));
+            } else {
+                range.len() as PinOrder - (current - start)
+            }
+        };
+
+        if let Err(e) = node.stub.change_input_count(new_count) {
+            warn!("failed to add pins to the node {node_id}. {e}");
+            return Err(e.into());
+        }
+
+        trace!("shift edges to accommodate added pins");
+        let shift_at = range.start;
+        let shift_cnt = range.len() as PinOrder;
+        let (inp, _) = self
+            .node_edge_io_slices_mut(node_id)
+            .expect("we found the node in this call already");
+        for edge in inp {
+            if edge.to.order >= shift_at {
+                edge.to.order += shift_cnt;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove node input pins. This is the opposite of [Canvas::add_node_input].
+    /// Deleting and moving existing edges accordingly, if necessary.
+    pub fn remove_node_input(
+        &mut self,
+        node_id: Id,
+        range: std::ops::Range<PinOrder>,
+    ) -> Result<(), ChangePinCountError> {
+        let node = self.node_mut(node_id).ok_or(NodeNotFoundError(node_id))?;
+
+        trace!("calculate extra pin count to remove from node {node_id} for removed pin range {range:?}");
+        let new_count = {
+            let current = node.stub.input_pin_count();
+            let start = range.start;
+
+            if start > current {
+                return Err(ChangePinCountError::InvalidRange(range));
+            } else {
+                current - range.len() as PinOrder
+            }
+        };
+
+        if let Err(e) = node.stub.change_input_count(new_count) {
+            warn!("failed to remove pins from the node {node_id}. {e}");
+            return Err(e.into());
+        }
+
+        trace!("remove edges that are no longer valid");
+        let mut vec = SmallVec::<[EdgeIdx; 128]>::new();
+        let (inp, _) = self.node_edge_io_ranges(node_id).expect("we found the node in this call already");
+        for edge_idx in inp {
+            let edge = &self.edges[edge_idx as usize];
+            if range.contains(&edge.to.order) {
+                vec.push(edge_idx as EdgeIdx);
+            }
+        }
+        // Remove from the end as this slightly reduces amount of data moves required,
+        // due to a usage of simple vector for edge storage.
+        for edge_idx in vec.into_iter().rev() {
+            self.edges.remove(edge_idx as usize);
+        }
+
+        trace!("shift edges to accommodate removed pins");
+        let shift_at = range.end;
+        let shift_cnt = range.len() as PinOrder;
+        let (inp, _) = self
+            .node_edge_io_slices_mut(node_id)
+            .expect("we found the node in this call already");
+        for edge in inp {
+            if edge.to.order >= shift_at {
+                edge.to.order -= shift_cnt;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ChangePinCountError {
+    #[error("failed to append pin to the node. {0}")]
+    NodeNotFound(NodeNotFoundError),
+
+    #[error("unapplicable pin appending operation as per node type")]
+    Unapplicable,
+
+    #[error("invalid pin range. {0:?}")]
+    InvalidRange(std::ops::Range<PinOrder>),
+}
+
+impl From<NodeNotFoundError> for ChangePinCountError {
+    fn from(e: NodeNotFoundError) -> Self {
+        ChangePinCountError::NodeNotFound(e)
+    }
+}
+
+impl From<InputUneditableError> for ChangePinCountError {
+    fn from(_: InputUneditableError) -> Self {
+        ChangePinCountError::Unapplicable
+    }
 }
 
 #[derive(Debug, Error)]
@@ -294,34 +447,6 @@ pub struct Node<Meta> {
     pub id: Id,
     pub stub: NodeStub,
     pub meta: Meta,
-}
-
-impl<Meta> Node<Meta> {
-    pub fn is_predicate(&self) -> bool {
-        self.stub.is_predicate()
-    }
-
-    pub fn is_start(&self) -> bool {
-        self.stub.is_start()
-    }
-
-    /// Count of input pins of the node, if statically known.
-    pub const fn static_input_count(&self) -> Option<usize> {
-        if let Some(v) = self.stub.static_inputs() {
-            Some(v.len())
-        } else {
-            None
-        }
-    }
-
-    /// Count of output pins of the node, if statically known.
-    pub const fn static_output_count(&self) -> Option<usize> {
-        if let Some(v) = self.stub.static_outputs() {
-            Some(v.len())
-        } else {
-            None
-        }
-    }
 }
 
 pub type PinOrder = u8;
@@ -381,11 +506,23 @@ impl Deref for OutputPin {
     }
 }
 
+impl DerefMut for OutputPin {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl Deref for InputPin {
     type Target = Pin;
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DerefMut for InputPin {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -849,6 +986,46 @@ impl NodeStub {
         Some(some)
     }
 
+    /// Change the input count if the node has a flexible number of input pins.
+    /// Error is returned if the node does not support changing the input count.
+    pub const fn change_input_count(&mut self, new: PinOrder) -> Result<(), InputUneditableError> {
+        use NodeStub::*;
+        match self {
+            File
+            | SplitBy { .. }
+            | Input { .. }
+            | Drop
+            | Output { .. }
+            | StrOp(_)
+            | Compare { .. }
+            | Ordering
+            | Regex(_)
+            | FindRecord(_)
+            | Map { .. }
+            | List { .. }
+            | OkOrErr
+            | ExpectSome { .. }
+            | Validate { .. }
+            | Func(_)
+            | ParseDateTime { .. }
+            | ParseMonetary { .. }
+            | ParseInt { .. }
+            | Constant(_)
+            | Crash { .. }
+            | OkOrCrash { .. }
+            | Unreachable { .. }
+            | Todo { .. }
+            | Comment { .. } => return Err(InputUneditableError),
+
+            IfElse { inputs }
+            | SelectFirst { inputs }
+            | ExpectOne { inputs }
+            | Match { inputs, .. } => *inputs = new,
+        }
+
+        Ok(())
+    }
+
     pub const fn static_total_pin_count(&self) -> Option<PinOrder> {
         match (self.static_inputs(), self.static_outputs()) {
             (Some(inputs), Some(outputs)) => {
@@ -971,6 +1148,10 @@ impl NodeStub {
         matches!(self, Func(_) | Validate { .. } | FindRecord(_))
     }
 }
+
+#[derive(Debug, Error)]
+#[error("input pin count cannot be changed per node stub kind")]
+pub struct InputUneditableError;
 
 pub enum IoRelation {
     /// These pin numbers should be the same type.
