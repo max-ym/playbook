@@ -15,6 +15,8 @@ use thiserror::Error;
 pub struct Canvas<NodeMeta> {
     pub(crate) nodes: Vec<Node<NodeMeta>>,
     pub(crate) edges: Vec<Edge>,
+    pub(crate) predicates: Vec<CanvasPredicate<NodeMeta>>,
+
     rnd: SmallRng,
 
     /// IDs of the root nodes of the canvas.
@@ -41,6 +43,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         Self {
             nodes: Vec::new(),
             edges: Vec::new(),
+            predicates: Vec::new(),
             root_nodes: Vec::new(),
             rnd: {
                 use rand::SeedableRng;
@@ -267,6 +270,14 @@ impl<NodeMeta> Canvas<NodeMeta> {
         if let Some(idx) = self.root_nodes.iter().position(|&n| n == node) {
             self.root_nodes.swap_remove(idx);
         }
+    }
+
+    /// Get predicate by its ID.
+    pub fn predicate(&self, id: Id) -> Option<&PredicateImpl<NodeMeta>> {
+        self.predicates
+            .binary_search_by(|p| p.id.cmp(&id))
+            .ok()
+            .map(|idx| &self.predicates[idx].imp)
     }
 }
 
@@ -1644,7 +1655,7 @@ impl PredicateRef {
 /// External projects are qualified if they have at least one pin to be callable
 /// from the flow.
 #[derive(Debug)]
-pub(crate) enum PredicateImpl<NodeMeta> {
+pub enum PredicateImpl<NodeMeta> {
     /// Predicate is purely external and is not implemented in the current project.
     /// It cannot be run with actual values as this required linking to the external project,
     /// so only declared types are used during validation.
@@ -1667,6 +1678,38 @@ pub(crate) enum PredicateImpl<NodeMeta> {
         /// Edges between nodes of the predicate.
         edges: Vec<Edge>,
     },
+}
+
+#[derive(Debug)]
+pub(crate) struct CanvasPredicate<NodeMeta> {
+    pub(crate) id: Id,
+    pub(crate) imp: PredicateImpl<NodeMeta>,
+}
+
+impl<NodeMeta> PartialEq for CanvasPredicate<NodeMeta> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<NodeMeta> Eq for CanvasPredicate<NodeMeta> {}
+
+impl<NodeMeta> std::hash::Hash for CanvasPredicate<NodeMeta> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl<NodeMeta> PartialOrd for CanvasPredicate<NodeMeta> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.id.partial_cmp(&other.id)
+    }
+}
+
+impl<NodeMeta> Ord for CanvasPredicate<NodeMeta> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
 }
 
 /// Operation to apply to a `String` input.
