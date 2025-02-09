@@ -1103,7 +1103,7 @@ mod tests {
             PT::Str,
             PT::Ordering,
             PT::File,
-            PT::Result(Box::new(PT::Int)),
+            PT::Result(Box::new((PT::Int, PT::Unit))),
         ];
         for expect in expect_types {
             let pos = t

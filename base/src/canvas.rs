@@ -6,7 +6,7 @@ use std::{
 use bigdecimal::BigDecimal;
 use compact_str::CompactString;
 use lazy_regex::Regex;
-use log::trace;
+use log::{trace, warn};
 use rand::rngs::SmallRng;
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -412,43 +412,76 @@ pub struct Id(IdInnerType);
 
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.is_node() {
-            write!(f, "Node{}", self.unprefix())
-        } else {
-            write!(f, "Err{}", self.unprefix())
+        use IdKind::*;
+        match self.id_kind() {
+            Node => write!(f, "Node{}", self.unprefix()),
+            Predicate => write!(f, "Predicate{}", self.unprefix()),
         }
     }
 }
 
 impl Id {
-    pub const NODE_PREFIX: u32 = 0x4000_0000;
-    pub const RND_MAX_STEP: u32 = 128;
-    pub const ZERO: Id = Id(0);
+    pub const NODE_PREFIX: IdInnerType = 0x4000_0000;
+    pub const PREDICATE_PREFIX: IdInnerType = 0x2000_0000;
+
+    pub const RND_MAX_STEP: IdInnerType = 128;
 
     /// Allocate a new node ID.
     pub fn new_node_after(id: Id, rng: &mut SmallRng) -> Option<Id> {
         Self::new(id, rng, Self::NODE_PREFIX)
     }
 
-    fn new(id: Id, rng: &mut SmallRng, prefix: u32) -> Option<Id> {
+    fn new(id: Id, rng: &mut SmallRng, prefix: IdInnerType) -> Option<Id> {
         use rand::RngCore;
         let step = 1 + rng.next_u32() % Self::RND_MAX_STEP;
         let new_id = id.unprefix().checked_add(step)?;
-        Some(Id(new_id | prefix))
+        if Self::overlaps_prefix(new_id) {
+            warn!("generation of new ID failed due to prefix overlap of a new value `{new_id}`");
+            None
+        } else {
+            Some(Id(new_id | prefix))
+        }
+    }
+
+    fn overlaps_prefix(val: IdInnerType) -> bool {
+        val & (Self::NODE_PREFIX | Self::PREDICATE_PREFIX) != 0
     }
 
     /// Remove all prefix bits from the ID.
-    pub const fn unprefix(self) -> u32 {
-        self.0 & !Self::NODE_PREFIX
+    pub const fn unprefix(self) -> IdInnerType {
+        self.0 & !Self::NODE_PREFIX & !Self::PREDICATE_PREFIX
     }
 
-    pub const fn get(&self) -> u32 {
+    pub const fn get(&self) -> IdInnerType {
         self.0
     }
 
-    pub const fn is_node(&self) -> bool {
-        self.0 & Self::NODE_PREFIX != 0
+    /// Kind of the ID.
+    ///
+    /// # Panic
+    /// This function will panic if the ID is neither a node nor a predicate.
+    /// This should not be possible unless the ID was constructed manually.
+    pub const fn id_kind(&self) -> IdKind {
+        let is_node = self.0 & Self::NODE_PREFIX != 0;
+        let is_predicate = self.0 & Self::PREDICATE_PREFIX != 0;
+
+        if is_node == is_predicate {
+            panic!("ID has to be either a node or a predicate");
+        } else if is_node {
+            IdKind::Node
+        } else if is_predicate {
+            IdKind::Predicate
+        } else {
+            panic!("should not be reachable");
+        }
     }
+}
+
+/// The kind of the ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IdKind {
+    Node,
+    Predicate,
 }
 
 #[derive(Debug, Clone)]
@@ -469,6 +502,9 @@ pub enum NodeStub {
     /// “Dep Birth Date 2”… user can set up expressions for them and have
     /// each dependent record being output as a separate row. This effectively
     /// allows to “split by” columns and run flow for these new generated rows.
+    /// All columns that are not matched by the regex are copied over to each new row.
+    ///
+    /// Example: `^((Dependent [0-9]+)|(Dep Birth Date [0-9]+))$`.
     SplitBy { regex: Regex },
 
     /// Input node describes a column that is used for reading the
@@ -519,7 +555,7 @@ pub enum NodeStub {
     /// for example, can be used to find a matching employee record from the
     /// dependent record. Or all dependent records for one employee.
     /// Returns Result of array of records.
-    FindRecord(Predicate),
+    FindRecord(PredicateRef),
 
     /// Map values of one type to another values of possibly other type. Maps should be exhaustive.
     Map {
@@ -542,13 +578,49 @@ pub enum NodeStub {
 
     /// Check the boolean predicate and execute either branch.
     IfElse {
-        /// Inputs number excluding the condition predicate inputs.
+        /// Data inputs number. This effectively also is the number of outputs times two, for
+        /// each branch. This node also has one more extra pin (comming first) for the
+        /// boolean value to check - it is not counted in this number.
         inputs: PinOrder,
-        condition: Predicate,
     },
 
     /// Check Result and execute either branch passing the corresponding value.
     OkOrErr,
+
+    /// Validate the input values with the predicate.
+    /// Produces outputs with Result types. Output count is the same as input count, matching
+    /// each input with the corresponding output pin.
+    /// Each Result variant contains the input value unchanged,
+    /// to allow to pass the value forward in the flow with this additional indication
+    /// of correctness.
+    Validate {
+        /// Predicate to validate the values with. It has the same inputs as this node.
+        /// Predicate should return true if the values are valid, and false otherwise.
+        predicate: PredicateRef,
+    },
+
+    /// Select the first value that is not None in the inputs.
+    /// If all inputs are None, the output is None.
+    /// Input type can be non-optional type, which will be treated as Some value,
+    /// and in turn can act as a default value if placed first and all other inputs are None.
+    /// If there is a non-Option input, output type is also non-Option, as it is guaranteed
+    /// that there is a value to output.
+    ///
+    /// This node can be used to receive values produced by [NodeStub::IfElse] or similar
+    /// nodes, to merge the branches back into one flow.
+    SelectFirst { inputs: PinOrder },
+
+    /// Expect only one input to be Some, and return the value as Ok value, unwrapping
+    /// from Option. Otherwise, return Err with the array of all values, unwrapped from Option.
+    /// This array will be empty if all inputs are None.
+    ExpectOne { inputs: PinOrder },
+
+    /// Expect optional input to be Some, and return the value. Otherwise, crash with the
+    /// provided message. Output type is unwrapped from the Option.
+    ExpectSome {
+        /// Message to display when crashing, can be empty (then ignored).
+        msg: CompactString,
+    },
 
     /// Match the input values and execute appropriate branch.
     /// Match should be exhaustive (or with wildcard).
@@ -569,7 +641,7 @@ pub enum NodeStub {
     /// Predicates are useful if we are writing library project and want to export
     /// these function to be used elsewhere.
     /// Flow execution functions are needed to change or compute the values.
-    Func(Predicate),
+    Func(PredicateRef),
 
     /// Parse the date of the given format(s).
     /// Input is a String and output is Result of a Date,
@@ -593,19 +665,19 @@ pub enum NodeStub {
     /// A constant value of some type.
     Constant(Value),
 
-    /// Make the program crash, with some (optional) message.
-    Crash {
-        /// Message to display when crashing, can be empty (then ignored).
-        msg: CompactString,
-    },
-
     /// Get Ok value of Result and proceed, or crash on Error variant with optional message.
     OkOrCrash {
         /// Message to display when crashing, can be empty (then ignored).
         msg: CompactString,
     },
 
-    /// The same as Crash, but with different semantics.
+    /// Crash the flow with the provided message, if it reaches this node during execution.
+    Crash {
+        /// Message to display when crashing, can be empty (then ignored).
+        msg: CompactString,
+    },
+
+    /// The same as [NodeStub::Crash], but with different semantics.
     /// To be used when some flow is believed to never reach this node.
     Unreachable {
         /// Message to display when crashing, can be empty (then ignored).
@@ -614,8 +686,8 @@ pub enum NodeStub {
 
     /// To mark unimplemented flow that should be eventually implemented.
     /// To allow saving the project that is WIP as to pass exhaustiveness
-    /// (or other?) validations.
-    /// Project with outstanding Todo nodes cannot be “deployed”.
+    /// (and other) validations.
+    /// Project with outstanding Todo nodes cannot be "deployed".
     ///
     /// Todo can have many inputs and outputs, which just directly pass the value(s) forward.
     Todo {
@@ -626,8 +698,10 @@ pub enum NodeStub {
         inputs: PinOrder,
     },
 
-    /// Just some comment, for visuals. Can have many inputs and outputs,
+    /// Just some comment, for humans. Can have many inputs and outputs,
     /// which just directly pass the value(s) forward. Must have the same number of ins and outs.
+    /// It functions the same as [NodeStub::Todo], but allows to pass all validations
+    /// and deployment.
     Comment {
         msg: CompactString,
 
@@ -654,21 +728,25 @@ impl NodeStub {
             Compare { .. } => &[Some(PT::Bool)],
             Ordering => &[Some(PT::Ordering)],
             Regex(_) => return None,
-            FindRecord(_) => &[Some(PT::Result(&(PT::Array(&PT::Record))))],
+            FindRecord(_) => &[Some(PT::Result((&(PT::Array(&PT::Record)), &PT::Unit)))],
             Map { .. } => return None,
             List { .. } => return None,
             IfElse { .. } => return None,
             OkOrErr => &[None, None],
+            Validate { .. } => return None,
+            SelectFirst { .. } => &[None],
+            ExpectOne { .. } => &[None],
+            ExpectSome { .. } => &[None],
             Match { .. } => return None,
             Func(_) => return None,
             ParseDateTime { date, time, .. } => match (date, time) {
-                (true, false) => &[Some(PT::Result(&(PT::Date)))],
-                (false, true) => &[Some(PT::Result(&(PT::Time)))],
-                (true, true) => &[Some(PT::Result(&(PT::DateTime)))],
-                (false, false) => &[Some(PT::Result(&(PT::Unit)))],
+                (true, false) => &[Some(PT::Result((&(PT::Date), &PT::Unit)))],
+                (false, true) => &[Some(PT::Result((&PT::Time, &PT::Unit)))],
+                (true, true) => &[Some(PT::Result((&PT::DateTime, &PT::Unit)))],
+                (false, false) => &[Some(PT::Result((&PT::Unit, &PT::Unit)))],
             },
-            ParseMonetary { .. } => &[Some(PT::Result(&(PT::Moneraty)))],
-            ParseInt { .. } => &[Some(PT::Result(&(PT::Int)))],
+            ParseMonetary { .. } => &[Some(PT::Result((&PT::Moneraty, &PT::Unit)))],
+            ParseInt { .. } => &[Some(PT::Result((&PT::Int, &PT::Unit)))],
             Constant(_) => &[None],
             Crash { .. } => &[],
             OkOrCrash { .. } => &[None],
@@ -701,6 +779,10 @@ impl NodeStub {
             List { .. } => FullSymmetry,
             IfElse { .. } => Unspecified,
             OkOrErr => Same(&[(1, 2)]),
+            Validate { .. } => Unspecified,
+            SelectFirst { .. } => Unspecified,
+            ExpectOne { .. } => Unspecified,
+            ExpectSome { .. } => Unspecified,
             Match { .. } => Unspecified,
             Func(_) => Unspecified,
             ParseDateTime { .. } => Unspecified,
@@ -708,7 +790,7 @@ impl NodeStub {
             ParseInt { .. } => Unspecified,
             Constant(_) => Unspecified,
             Crash { .. } => Unspecified,
-            OkOrCrash { .. } => FullSymmetry,
+            OkOrCrash { .. } => Unspecified,
             Unreachable { .. } => Unspecified,
             Todo { .. } => FullSymmetry,
             Comment { .. } => FullSymmetry,
@@ -737,6 +819,10 @@ impl NodeStub {
             List { .. } => return None,
             IfElse { .. } => return None,
             OkOrErr => &[None],
+            Validate { .. } => return None,
+            SelectFirst { .. } => return None,
+            ExpectOne { .. } => return None,
+            ExpectSome { .. } => &[None],
             Match { .. } => return None,
             Func(_) => return None,
             ParseDateTime { .. } => &[Some(PT::Str)],
@@ -780,7 +866,8 @@ impl NodeStub {
             Func(predicate) => predicate.output_pin_count(),
             Match { values, .. } => values.len() as PinOrder,
             List { .. } => self.input_pin_count(),
-            IfElse { inputs, .. } => *inputs,
+            IfElse { inputs, .. } => *inputs * 2,
+            Validate { predicate } => predicate.input_pin_count(), // we pass inputs forward
             Regex(regex) => regex.captures_len() as PinOrder,
             Map { tuples, .. } => tuples[0].1.array_len().unwrap_or(1) as PinOrder,
             _ => unreachable!("total_pin_count should be implemented for {self:?}"),
@@ -795,10 +882,13 @@ impl NodeStub {
         use NodeStub::*;
         match self {
             Comment { inputs, .. } | Todo { inputs, .. } => *inputs,
-            Func(predicate) => predicate.inputs.len() as PinOrder,
+            Func(predicate) => predicate.input_pin_count(),
             Match { inputs, .. } => *inputs,
             List { values } => values[0].array_len().unwrap_or(1) as PinOrder,
-            IfElse { inputs, condition } => condition.inputs.len() as PinOrder + *inputs,
+            IfElse { inputs } => *inputs + 1,
+            Validate { predicate } => predicate.input_pin_count(),
+            SelectFirst { inputs } => *inputs,
+            ExpectOne { inputs } => *inputs,
             Map { tuples, .. } => tuples.len() as PinOrder,
             _ => unreachable!("input_pin_count should be implemented for {self:?}"),
         }
@@ -867,7 +957,7 @@ impl NodeStub {
 
     pub const fn is_predicate(&self) -> bool {
         use NodeStub::*;
-        matches!(self, Func(_) | IfElse { .. } | FindRecord(_))
+        matches!(self, Func(_) | Validate { .. } | FindRecord(_))
     }
 }
 
@@ -973,38 +1063,171 @@ impl<'pins> ResolvePinTypes<'pins> {
                         // Input types should be already provided externally.
                         Self { pins, is_progress }
                     }
-                    IfElse { condition, inputs } => {
-                        // Output pins have groups for true and false branch.
-                        // Otherwise, each of that group is symmetric to input pins, except for
-                        // the first ones that go to the condition predicate.
+                    IfElse { .. } => {
+                        is_progress |=
+                            ResolvePinTypes::match_types_write(PrimitiveType::Bool, &mut pins[0])?;
+                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                        for (i, o) in ins.iter_mut().skip(1).zip(outs.iter_mut()) {
+                            let any = ResolvePinTypes::any(i, o);
+                            is_progress |= ResolvePinTypes::set_to(any, i, o);
+                        }
 
-                        let after_predicate_idx = condition.input_pin_count() as usize;
-                        let branch_size = *inputs as usize;
-                        let (predicate_pins, rest) = pins.split_at_mut(after_predicate_idx);
-                        let (input_pins, rest) = rest.split_at_mut(branch_size);
-                        let (true_branch, false_branch) = rest.split_at_mut(branch_size);
-                        assert_eq!(input_pins.len(), branch_size);
-                        assert_eq!(true_branch.len(), branch_size);
-                        assert_eq!(false_branch.len(), branch_size);
-
-                        // Resolve input data pins (exclude predicate).
-                        for (i, (t, f)) in true_branch
-                            .iter_mut()
-                            .zip(false_branch.iter_mut())
-                            .enumerate()
-                        {
-                            if let Some(ty) = input_pins[i].as_ref() {
-                                is_progress |= ResolvePinTypes::match_types_write(ty.clone(), t)?;
-                                is_progress |= ResolvePinTypes::match_types_write(ty.clone(), f)?;
+                        Self { pins, is_progress }
+                    }
+                    Validate { .. } => {
+                        // All outputs are wrapped as Result, but otherwise, the same as
+                        // the inputs.
+                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                        for (i, o) in ins.iter_mut().zip(outs.iter_mut()) {
+                            if let Some(i) = i {
+                                let out =
+                                    PrimitiveType::Result(Box::new((i.to_owned(), i.to_owned())));
+                                is_progress |= ResolvePinTypes::match_types_write(out, o)?;
                             }
                         }
 
-                        // Resolve predicate pins.
-                        for (i, ty) in condition.inputs.iter().enumerate() {
-                            is_progress |= ResolvePinTypes::match_types_write(
-                                ty.to_owned(),
-                                &mut predicate_pins[i],
-                            )?;
+                        Self { pins, is_progress }
+                    }
+                    SelectFirst { .. } => {
+                        // Inputs can be Option or non-Option type. If Option input exists,
+                        // it should be the same as non-Option one. If
+                        // non Option is not provided, all types should be the same.
+                        // There is just one output of that selected type.
+
+                        // We can try to match all inputs. If first one mismatches, check if
+                        // it is Option and if unwrapping the type helps.
+                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                        let detect = {
+                            // Get a known type in any of the input pins, except first one as
+                            // it can differ by being wrapped into Option.
+                            let mut detect = None;
+                            for i in ins.iter().skip(1) {
+                                if let Some(i) = i {
+                                    detect = Some(i);
+                                    break;
+                                }
+                            }
+                            detect
+                        };
+
+                        let detect = if let Some(detect) = detect {
+                            // Unwrap the Option, we pass the unwrapped type moving forward.
+                            if let PrimitiveType::Option(inner) = detect {
+                                Some((**inner).to_owned())
+                            } else {
+                                // Expected optional input at this point, but instead
+                                // got a non-optional type.
+                                None
+                            }
+                        } else {
+                            // No known type, but we can check the outputs.
+                            let mut detect = None;
+                            for o in outs.iter() {
+                                if let Some(o) = o {
+                                    detect = Some(o.to_owned());
+                                    break;
+                                }
+                            }
+                            detect
+                        };
+
+                        let detect = if let Some(detect) = detect {
+                            Some(detect)
+                        } else {
+                            // Last change - check first input that we skipped.
+                            if let Some(i) = ins.first() {
+                                if let Some(i) = i {
+                                    let i = i.to_owned();
+                                    if !matches!(i, PrimitiveType::Option(_)) {
+                                        Some(i)
+                                    } else {
+                                        // We cannot assume whether this Option
+                                        // is actually optional input, or a
+                                        // type that just so happened to be wrapped
+                                        // into Option. We cannot make any assumptions
+                                        // here, otherwise risking to wrongfully
+                                        // fail the validator.
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some(detect) = detect {
+                            // We know the base type, so fill in all inputs and outputs,
+                            // except the first one, which can be Option or not.
+                            for i in ins.iter_mut().skip(1).chain(outs.iter_mut()) {
+                                is_progress |=
+                                    ResolvePinTypes::match_types_write(detect.clone(), i)?;
+                            }
+                        }
+
+                        Self { pins, is_progress }
+                    }
+                    ExpectOne { .. } => {
+                        // All inputs should be the same type, and the output is the result:
+                        // Result<type, Array<type>>.
+
+                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                        assert_eq!(outs.len(), 1);
+
+                        // Get a known type in any of the input pins.
+                        let detect = {
+                            let mut detect = None;
+                            for i in ins.iter() {
+                                if let Some(i) = i {
+                                    detect = Some(i);
+                                    break;
+                                }
+                            }
+                            detect
+                        };
+
+                        if let Some(detect) = detect.map(ToOwned::to_owned) {
+                            for i in ins.iter_mut() {
+                                is_progress |=
+                                    ResolvePinTypes::match_types_write(detect.clone(), i)?;
+                            }
+
+                            let out = PrimitiveType::Result(Box::new((
+                                detect.clone(),
+                                PrimitiveType::Array(Box::new(detect)),
+                            )));
+
+                            is_progress |= ResolvePinTypes::match_types_write(out, &mut outs[0])?;
+                        }
+
+                        Self { pins, is_progress }
+                    }
+                    ExpectSome { .. } => {
+                        // All inputs should be the same type, and the output is the same type.
+                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                        assert_eq!(outs.len(), 1);
+
+                        // Get a known type in any of the pins.
+                        let detect = {
+                            let mut detect = None;
+                            for i in ins.iter().chain(outs.iter()) {
+                                if let Some(i) = i {
+                                    detect = Some(i);
+                                    break;
+                                }
+                            }
+                            detect
+                        };
+
+                        if let Some(detect) = detect.map(ToOwned::to_owned) {
+                            for i in ins.iter_mut() {
+                                is_progress |=
+                                    ResolvePinTypes::match_types_write(detect.clone(), i)?;
+                            }
+
+                            is_progress |=
+                                ResolvePinTypes::match_types_write(detect, &mut outs[0])?;
                         }
 
                         Self { pins, is_progress }
@@ -1241,16 +1464,18 @@ pub enum Value {
     Str(CompactString),
     Ordering(std::cmp::Ordering),
     Array(Vec<Value>),
-    Predicate(Predicate),
     Result {
-        // Value is propagated only on Ok, but we still always carry it around for type resolution.
-        value: Box<Value>,
-        is_ok: bool,
+        value: Result<Box<Value>, Box<Value>>,
+
+        /// A value of the other variant than the one that is present.
+        /// This is used to determine the type of the other variant.
+        ///
+        /// We store just one to reduce [Value] size.
+        other: PrimitiveType,
     },
     Option {
-        // We still carry it around for type resolution and possibly some logs.
-        value: Box<Value>,
-        is_some: bool,
+        value: Option<Box<Value>>,
+        some: PrimitiveType,
     },
 }
 
@@ -1269,9 +1494,11 @@ impl Value {
             Str(_) => PrimitiveType::Str,
             Ordering(_) => PrimitiveType::Ordering,
             Array(v) => PrimitiveType::Array(Box::new(v[0].type_of())),
-            Predicate(p) => PrimitiveType::Predicate(Box::new(p.clone())),
-            Result { value, .. } => PrimitiveType::Result(Box::new(value.type_of())),
-            Option { value, .. } => PrimitiveType::Option(Box::new(value.type_of())),
+            Result { value, other } => match value {
+                Ok(v) => PrimitiveType::Result(Box::new((v.type_of(), other.clone()))),
+                Err(v) => PrimitiveType::Result(Box::new((other.clone(), v.type_of()))),
+            },
+            Option { some, .. } => PrimitiveType::Option(Box::new(some.to_owned())),
         }
     }
 
@@ -1333,8 +1560,7 @@ pub enum PrimitiveType {
     File,
     Record,
     Array(Box<PrimitiveType>),
-    Predicate(Box<Predicate>),
-    Result(Box<PrimitiveType>),
+    Result(Box<(PrimitiveType, PrimitiveType)>),
     Option(Box<PrimitiveType>),
 }
 
@@ -1353,8 +1579,7 @@ pub enum PrimitiveTypeConst {
     File,
     Record,
     Array(&'static PrimitiveTypeConst),
-    Predicate(&'static PredicateConst),
-    Result(&'static PrimitiveTypeConst),
+    Result((&'static PrimitiveTypeConst, &'static PrimitiveTypeConst)),
     Option(&'static PrimitiveTypeConst),
 }
 
@@ -1375,56 +1600,73 @@ impl From<PrimitiveTypeConst> for PrimitiveType {
             PT::File => PrimitiveType::File,
             PT::Record => PrimitiveType::Record,
             PT::Array(&v) => PrimitiveType::Array(Box::new(v.into())),
-            PT::Predicate(&pc) => PrimitiveType::Predicate(Box::new(pc.into())),
-            PT::Result(&a) => PrimitiveType::Result(Box::new(a.into())),
+            PT::Result((&a, &b)) => PrimitiveType::Result(Box::new((a.into(), b.into()))),
             PT::Option(&v) => PrimitiveType::Option(Box::new(v.into())),
         }
     }
 }
 
-/// Predicate is effectively some function that can take and output
-/// some values. It can be used to filter records, find records, etc.
-///
-/// As predicates, external projects that are applicable can be imported.
-/// They are then considered external dependencies of the current project.
-///
-/// To qualify as a predicate, the function must be pure and deterministic.
-///
-/// External projects are qualified if they have at least one pin for the node
-/// they will be represented with. They themselves, as functions, should be pure and deterministic.
+/// Reference to a predicate inside the [Canvas]. This also carries information
+/// about pin count for [NodeStub] to be able to output the correct number of pins.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Predicate {
-    pub inputs: SmallVec<[PrimitiveType; 1]>,
-    pub outputs: SmallVec<[PrimitiveType; 1]>,
+pub struct PredicateRef {
+    /// Identifier of a predicate inside the [Canvas].
+    pub id: Id,
+
+    /// Number of inputs.
+    pub inputs: PinOrder,
+
+    /// Number of outputs.
+    pub outputs: PinOrder,
 }
 
-impl Predicate {
+impl PredicateRef {
     pub fn total_pin_count(&self) -> PinOrder {
         self.input_pin_count() + self.output_pin_count()
     }
 
     pub fn input_pin_count(&self) -> PinOrder {
-        self.inputs.len() as PinOrder
+        self.inputs
     }
 
     pub fn output_pin_count(&self) -> PinOrder {
-        self.outputs.len() as PinOrder
+        self.outputs
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PredicateConst {
-    pub inputs: &'static [PrimitiveTypeConst],
-    pub outputs: &'static [PrimitiveTypeConst],
-}
+/// Implementation details of the predicate.
+///
+/// Predicate is effectively some function that can take and output
+/// some values. It can be used to filter records, find records, etc.
+///
+/// As predicates (components), external projects that are applicable can be imported.
+/// They are then considered external dependencies of the current project.
+/// External projects are qualified if they have at least one pin to be callable
+/// from the flow.
+#[derive(Debug)]
+pub(crate) enum PredicateImpl<NodeMeta> {
+    /// Predicate is purely external and is not implemented in the current project.
+    /// It cannot be run with actual values as this required linking to the external project,
+    /// so only declared types are used during validation.
+    Extern {
+        /// The symbol by which the predicate is linked into the final binary.
+        symbol: CompactString,
 
-impl From<PredicateConst> for Predicate {
-    fn from(pc: PredicateConst) -> Self {
-        Self {
-            inputs: pc.inputs.iter().copied().map(Into::into).collect(),
-            outputs: pc.outputs.iter().copied().map(Into::into).collect(),
-        }
-    }
+        /// Pin types of the predicate.
+        pins: Vec<PrimitiveType>,
+
+        /// Number of inputs. Used to split the pins array to get inputs and outputs.
+        input_count: PinOrder,
+    },
+
+    /// Predicate is stored in the current project as a component.
+    Component {
+        /// Nodes as predicate implementation.
+        nodes: Vec<Node<NodeMeta>>,
+
+        /// Edges between nodes of the predicate.
+        edges: Vec<Edge>,
+    },
 }
 
 /// Operation to apply to a `String` input.
