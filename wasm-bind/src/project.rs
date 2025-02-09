@@ -938,36 +938,8 @@ impl JsDataType {
             File => J::File,
             Record => J::Record,
             Array(_) => J::Array,
-            Predicate(_) => J::Predicate,
             Result(_) => J::Result,
             Option(_) => J::Option,
-        }
-    }
-
-    /// Inner data type if this is a nested data type.
-    #[wasm_bindgen(getter)]
-    pub fn inner(&self) -> std::option::Option<JsDataType> {
-        use canvas::PrimitiveType::*;
-        use std::ops::Deref;
-        match &self.repr {
-            Array(inner) => Some(inner.deref().to_owned().into()),
-            Result(inner) => Some(inner.deref().to_owned().into()),
-            Option(inner) => Some(inner.deref().to_owned().into()),
-
-            Predicate(_) => None,
-
-            Int => None,
-            Uint => None,
-            Unit => None,
-            Moneraty => None,
-            Date => None,
-            DateTime => None,
-            Time => None,
-            Bool => None,
-            Str => None,
-            Ordering => None,
-            File => None,
-            Record => None,
         }
     }
 }
@@ -1057,25 +1029,27 @@ impl JsDataInstance {
                 }
                 arr.into()
             }
-            Predicate(predicate) => JsPredicate {
-                inputs: predicate.inputs.iter().map(|t| t.clone().into()).collect(),
-                outputs: predicate.outputs.iter().map(|t| t.clone().into()).collect(),
+            Result { value, .. } => match value {
+                Ok(value) => JsResult {
+                    value: JsDataInstance {
+                        value: value.deref().clone(),
+                    }
+                    .into(),
+                    is_ok: true,
+                },
+                Err(value) => JsResult {
+                    value: JsDataInstance {
+                        value: value.deref().clone(),
+                    }
+                    .into(),
+                    is_ok: false,
+                },
             }
             .into(),
-            Result { value, is_ok } => JsResult {
-                value: JsDataInstance {
-                    value: value.deref().clone(),
-                }
-                .into(),
-                is_ok: *is_ok,
-            }
-            .into(),
-            Option { value, is_some } => JsOption {
-                value: JsDataInstance {
-                    value: value.deref().clone(),
-                }
-                .into(),
-                is_some: *is_some,
+            Option { value, .. } => JsOption {
+                value: value.as_deref().map(|value| JsDataInstance {
+                    value: value.to_owned(),
+                }),
             }
             .into(),
         }
@@ -1117,16 +1091,8 @@ pub struct JsResult {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Option)]
 pub struct JsOption {
-    /// The value is always present, even on "None" variant.
-    /// It is not a valid data instance if `isSome` is `false`,
-    /// however this value still can be used to infer the data type, as it is
-    /// guaranteed to be the same as for the value of the `Some` variant.
     #[wasm_bindgen(readonly, getter_with_clone)]
-    pub value: JsDataInstance,
-
-    /// Whether the value is present. If this is `false`, the `value` is not a valid data instance.
-    #[wasm_bindgen(readonly, js_name = isSome)]
-    pub is_some: bool,
+    pub value: Option<JsDataInstance>,
 }
 
 #[derive(Debug)]
