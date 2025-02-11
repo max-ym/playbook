@@ -11,6 +11,9 @@ use rand::rngs::SmallRng;
 use smallvec::SmallVec;
 use thiserror::Error;
 
+/// Type validation and resolution of the data in canvas.
+pub mod valid;
+
 #[derive(Debug)]
 pub struct Canvas<NodeMeta> {
     pub(crate) nodes: Vec<Node<NodeMeta>>,
@@ -29,6 +32,8 @@ pub struct Canvas<NodeMeta> {
     /// cannot function as a starting point of execution in the valid project.
     /// This array is later used by the validation to ensure that all nodes are reachable.
     pub(crate) root_nodes: Vec<Id>,
+
+    pub(crate) valid: valid::Validator,
 }
 
 /// The type used for [Id] representation. This transitively defines the maximum number of
@@ -885,7 +890,7 @@ impl NodeStub {
             OkOrErr => &[None, None],
             Validate { .. } => return None,
             SelectFirst { .. } => &[None],
-            ExpectOne { .. } => &[None],
+            ExpectOne { .. } => &[Some(PT::Result((&PT::Hint, &PT::Hint)))],
             ExpectSome { .. } => &[None],
             Match { .. } => return None,
             Func(_) => return None,
@@ -914,37 +919,47 @@ impl NodeStub {
     pub const fn static_io_relation(&self) -> IoRelation {
         use IoRelation::*;
         use NodeStub::*;
-        match self {
-            File => Unspecified,
-            SplitBy { .. } => Unspecified,
-            Input { .. } => Unspecified,
-            Drop => Unspecified,
-            Output { .. } => Unspecified,
+
+        let v = match self {
+            File => ConstCount,
+            SplitBy { .. } => Dynamic,
+            Input { .. } => ConstCount,
+            Drop => ConstCount,
+            Output { .. } => ConstCount,
             StrOp(_) => FullSymmetry,
             Compare { .. } => Same(&[(0, 1)]),
             Ordering => Same(&[(0, 1)]),
-            Regex(_) => Unspecified,
-            FindRecord(_) => Unspecified,
-            Map { .. } => Unspecified,
+            Regex(_) => Dynamic,
+            FindRecord(_) => Dynamic,
+            Map { .. } => Dynamic,
             List { .. } => FullSymmetry,
-            IfElse { .. } => Unspecified,
+            IfElse { .. } => Dynamic,
             OkOrErr => Same(&[(1, 2)]),
-            Validate { .. } => Unspecified,
-            SelectFirst { .. } => Unspecified,
-            ExpectOne { .. } => Unspecified,
-            ExpectSome { .. } => Unspecified,
-            Match { .. } => Unspecified,
-            Func(_) => Unspecified,
-            ParseDateTime { .. } => Unspecified,
-            ParseMonetary { .. } => Unspecified,
-            ParseInt { .. } => Unspecified,
-            Constant(_) => Unspecified,
-            Crash { .. } => Unspecified,
-            OkOrCrash { .. } => Unspecified,
-            Unreachable { .. } => Unspecified,
+            Validate { .. } => Dynamic,
+            SelectFirst { .. } => Dynamic,
+            ExpectOne { .. } => Dynamic,
+            ExpectSome { .. } => ConstCount,
+            Match { .. } => Dynamic,
+            Func(_) => Dynamic,
+            ParseDateTime { .. } => ConstCount,
+            ParseMonetary { .. } => ConstCount,
+            ParseInt { .. } => ConstCount,
+            Constant(_) => ConstCount,
+            Crash { .. } => ConstCount,
+            OkOrCrash { .. } => ConstCount,
+            Unreachable { .. } => ConstCount,
             Todo { .. } => FullSymmetry,
             Comment { .. } => FullSymmetry,
+        };
+
+        if matches!(v, IoRelation::ConstCount) {
+            let is_valid = self.static_inputs().is_some() && self.static_outputs().is_some();
+            if !is_valid {
+                panic!("ConstCount relation requires known static input and output counts");
+            }
         }
+
+        v
     }
 
     /// Input pins of the node, if can be determined statically.
@@ -972,7 +987,7 @@ impl NodeStub {
             Validate { .. } => return None,
             SelectFirst { .. } => return None,
             ExpectOne { .. } => return None,
-            ExpectSome { .. } => &[None],
+            ExpectSome { .. } => &[Some(PT::Option(&PT::Hint))],
             Match { .. } => return None,
             Func(_) => return None,
             ParseDateTime { .. } => &[Some(PT::Str)],
@@ -1059,7 +1074,10 @@ impl NodeStub {
             IfElse { inputs, .. } => *inputs * 2,
             Validate { predicate } => predicate.input_pin_count(), // we pass inputs forward
             Regex(regex) => regex.captures_len() as PinOrder,
-            Map { tuples, .. } => tuples[0].1.array_len().unwrap_or(1) as PinOrder,
+            Map { tuples, .. } => tuples
+                .first()
+                .map(|(_, v)| v.array_len().unwrap_or(1) as PinOrder)
+                .unwrap_or(1),
             _ => unreachable!("total_pin_count should be implemented for {self:?}"),
         }
     }
@@ -1079,7 +1097,7 @@ impl NodeStub {
             Validate { predicate } => predicate.input_pin_count(),
             SelectFirst { inputs } => *inputs,
             ExpectOne { inputs } => *inputs,
-            Map { tuples, .. } => tuples.len() as PinOrder,
+            Map { .. } => self.output_pin_count(),
             _ => unreachable!("input_pin_count should be implemented for {self:?}"),
         }
     }
@@ -1162,447 +1180,11 @@ pub enum IoRelation {
     /// All input pins have matching output pins.
     FullSymmetry,
 
-    /// Pins have dynamic relation and/or number, or no relation at all.
-    Unspecified,
-}
+    /// Pins have dynamic relation and/or number.
+    Dynamic,
 
-/// Result of resolution of pin types of some node.
-pub struct ResolvePinTypes<'a> {
-    pins: &'a mut Vec<Option<PrimitiveType>>,
-    is_progress: bool,
-}
-
-impl<'pins> ResolvePinTypes<'pins> {
-    pub(crate) fn pin_io_slices_mut<'a>(
-        pins: &'a mut [Option<PrimitiveType>],
-        node: &NodeStub,
-    ) -> (
-        &'a mut [Option<PrimitiveType>],
-        &'a mut [Option<PrimitiveType>],
-    ) {
-        let (inputs, outputs) = pins.split_at_mut(node.input_pin_count() as usize);
-        (inputs, outputs)
-    }
-
-    /// Whether the last iteration has changed any pin type.
-    pub fn is_progress(&self) -> bool {
-        self.is_progress
-    }
-
-    /// Resolve the pin types of the given node.
-    /// The `set` parameter is a vector holding the resolved types of the input and output pins.
-    /// Resolver cannot change those but it can use them to determine the types of other pins.
-    /// Vector should be the same length as the number of pins of the node.
-    ///
-    /// `expect_progress_or_complete` should be set to true if the context expects to have
-    /// any progress in the resolution. If no progress is made, the function will return an error.
-    /// The error is silenced for already fully resolved nodes.
-    pub fn resolve(
-        node: &NodeStub,
-        pins: &'pins mut Vec<Option<PrimitiveType>>,
-        expect_progress_or_complete: bool,
-    ) -> Result<Self, PinResolutionError> {
-        if pins.len() as PinOrder != node.total_pin_count() {
-            return Err(PinResolutionError::PinNumberMismatch);
-        }
-
-        let mut is_progress = ResolvePinTypes::prefill_with_static(node, pins)?;
-
-        let result = match node.static_io_relation() {
-            IoRelation::Same(pairs) => {
-                for &(i, o) in pairs {
-                    let (i, o) = (i as usize, o as usize);
-                    let (i, o) = {
-                        // To satisfy the borrow checker, we split slice to guarantee
-                        // non-overlapping mutable references.
-                        let (a, b) = pins.split_at_mut(i + 1);
-                        (&mut a[i], &mut b[o - i - 1])
-                    };
-                    let any = ResolvePinTypes::any(i, o);
-                    is_progress |= ResolvePinTypes::set_to(any, i, o);
-                }
-
-                Self { pins, is_progress }
-            }
-            IoRelation::FullSymmetry => {
-                let (ins, outs) = Self::pin_io_slices_mut(pins, node);
-                for (i, o) in ins.iter_mut().zip(outs.iter_mut()) {
-                    is_progress |= ResolvePinTypes::unite(i, o)?;
-                }
-
-                Self { pins, is_progress }
-            }
-            IoRelation::Unspecified => {
-                use NodeStub::*;
-                match node {
-                    Regex { .. } => {
-                        // All should be strings.
-                        for pin in pins.iter_mut() {
-                            is_progress |=
-                                ResolvePinTypes::match_types_write(PrimitiveType::Str, pin)?;
-                        }
-
-                        Self { pins, is_progress }
-                    }
-                    Map { tuples, .. } => {
-                        let first = &tuples
-                            .first()
-                            .expect("Map should have at least one tuple")
-                            .1;
-                        for (i, val) in first.iter().enumerate() {
-                            is_progress |=
-                                ResolvePinTypes::match_types_write(val.type_of(), &mut pins[i])?;
-                        }
-
-                        // Input types should be already provided externally.
-                        Self { pins, is_progress }
-                    }
-                    IfElse { .. } => {
-                        is_progress |=
-                            ResolvePinTypes::match_types_write(PrimitiveType::Bool, &mut pins[0])?;
-                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
-                        for (i, o) in ins.iter_mut().skip(1).zip(outs.iter_mut()) {
-                            let any = ResolvePinTypes::any(i, o);
-                            is_progress |= ResolvePinTypes::set_to(any, i, o);
-                        }
-
-                        Self { pins, is_progress }
-                    }
-                    Validate { .. } => {
-                        // All outputs are wrapped as Result, but otherwise, the same as
-                        // the inputs.
-                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
-                        for (i, o) in ins.iter_mut().zip(outs.iter_mut()) {
-                            if let Some(i) = i {
-                                let out =
-                                    PrimitiveType::Result(Box::new((i.to_owned(), i.to_owned())));
-                                is_progress |= ResolvePinTypes::match_types_write(out, o)?;
-                            }
-                        }
-
-                        Self { pins, is_progress }
-                    }
-                    SelectFirst { .. } => {
-                        // Inputs can be Option or non-Option type. If Option input exists,
-                        // it should be the same as non-Option one. If
-                        // non Option is not provided, all types should be the same.
-                        // There is just one output of that selected type.
-
-                        // We can try to match all inputs. If first one mismatches, check if
-                        // it is Option and if unwrapping the type helps.
-                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
-                        let detect = {
-                            // Get a known type in any of the input pins, except first one as
-                            // it can differ by being wrapped into Option.
-                            let mut detect = None;
-                            for i in ins.iter().skip(1) {
-                                if let Some(i) = i {
-                                    detect = Some(i);
-                                    break;
-                                }
-                            }
-                            detect
-                        };
-
-                        let detect = if let Some(detect) = detect {
-                            // Unwrap the Option, we pass the unwrapped type moving forward.
-                            if let PrimitiveType::Option(inner) = detect {
-                                Some((**inner).to_owned())
-                            } else {
-                                // Expected optional input at this point, but instead
-                                // got a non-optional type.
-                                None
-                            }
-                        } else {
-                            // No known type, but we can check the outputs.
-                            let mut detect = None;
-                            for o in outs.iter() {
-                                if let Some(o) = o {
-                                    detect = Some(o.to_owned());
-                                    break;
-                                }
-                            }
-                            detect
-                        };
-
-                        let detect = if let Some(detect) = detect {
-                            Some(detect)
-                        } else {
-                            // Last change - check first input that we skipped.
-                            if let Some(i) = ins.first() {
-                                if let Some(i) = i {
-                                    let i = i.to_owned();
-                                    if !matches!(i, PrimitiveType::Option(_)) {
-                                        Some(i)
-                                    } else {
-                                        // We cannot assume whether this Option
-                                        // is actually optional input, or a
-                                        // type that just so happened to be wrapped
-                                        // into Option. We cannot make any assumptions
-                                        // here, otherwise risking to wrongfully
-                                        // fail the validator.
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-
-                        if let Some(detect) = detect {
-                            // We know the base type, so fill in all inputs and outputs,
-                            // except the first one, which can be Option or not.
-                            for i in ins.iter_mut().skip(1).chain(outs.iter_mut()) {
-                                is_progress |=
-                                    ResolvePinTypes::match_types_write(detect.clone(), i)?;
-                            }
-                        }
-
-                        Self { pins, is_progress }
-                    }
-                    ExpectOne { .. } => {
-                        // All inputs should be the same type, and the output is the result:
-                        // Result<type, Array<type>>.
-
-                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
-                        assert_eq!(outs.len(), 1);
-
-                        // Get a known type in any of the input pins.
-                        let detect = {
-                            let mut detect = None;
-                            for i in ins.iter() {
-                                if let Some(i) = i {
-                                    detect = Some(i);
-                                    break;
-                                }
-                            }
-                            detect
-                        };
-
-                        if let Some(detect) = detect.map(ToOwned::to_owned) {
-                            for i in ins.iter_mut() {
-                                is_progress |=
-                                    ResolvePinTypes::match_types_write(detect.clone(), i)?;
-                            }
-
-                            let out = PrimitiveType::Result(Box::new((
-                                detect.clone(),
-                                PrimitiveType::Array(Box::new(detect)),
-                            )));
-
-                            is_progress |= ResolvePinTypes::match_types_write(out, &mut outs[0])?;
-                        }
-
-                        Self { pins, is_progress }
-                    }
-                    ExpectSome { .. } => {
-                        // All inputs should be the same type, and the output is the same type.
-                        let (ins, outs) = Self::pin_io_slices_mut(pins, node);
-                        assert_eq!(outs.len(), 1);
-
-                        // Get a known type in any of the pins.
-                        let detect = {
-                            let mut detect = None;
-                            for i in ins.iter().chain(outs.iter()) {
-                                if let Some(i) = i {
-                                    detect = Some(i);
-                                    break;
-                                }
-                            }
-                            detect
-                        };
-
-                        if let Some(detect) = detect.map(ToOwned::to_owned) {
-                            for i in ins.iter_mut() {
-                                is_progress |=
-                                    ResolvePinTypes::match_types_write(detect.clone(), i)?;
-                            }
-
-                            is_progress |=
-                                ResolvePinTypes::match_types_write(detect, &mut outs[0])?;
-                        }
-
-                        Self { pins, is_progress }
-                    }
-                    Match { .. } => todo!(),
-                    Func { .. } => todo!(),
-                    Constant(value) => {
-                        let ty = value.type_of();
-                        assert_eq!(pins.len(), 1);
-                        is_progress |= ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
-
-                        Self { pins, is_progress }
-                    }
-                    _ => Self { pins, is_progress },
-                }
-            }
-        };
-
-        trace!("Resolved pins: {:#?}", result.pins);
-        if expect_progress_or_complete && !result.is_progress {
-            result.ensure_resolved()
-        } else {
-            Ok(result)
-        }
-    }
-
-    /// Prefill missing types per static information.
-    ///
-    /// # Panics
-    /// Pin count should be correct at this point. If it is not, this function will panic.
-    fn prefill_with_static(
-        node: &NodeStub,
-        pins: &mut Vec<Option<PrimitiveType>>,
-    ) -> Result<bool, PinResolutionError> {
-        let output_idx = node.output_pin_start_idx();
-        let mut is_progress = false;
-
-        trace!("static inputs prefill");
-        if let Some(static_inputs) = node.static_inputs() {
-            debug_assert_eq!(static_inputs.len(), output_idx as usize);
-            for (i, t) in static_inputs.iter().copied().enumerate() {
-                if let Some(t) = t.map(Into::into) {
-                    if pins[i].is_none() {
-                        trace!("prefill input pin {i} with {t:?}");
-                        is_progress = true;
-                        pins[i] = Some(t);
-                    } else if pins[i] != Some(t) {
-                        return Err(PinResolutionError::UnionConflict);
-                    }
-                }
-            }
-        }
-
-        trace!("static outputs prefill");
-        if let Some(static_outputs) = node.static_outputs() {
-            for (i, t) in static_outputs.iter().copied().enumerate() {
-                let i = i + output_idx as usize;
-                if let Some(t) = t.map(Into::into) {
-                    if pins[i].is_none() {
-                        trace!("prefill output pin {i} with {t:?}");
-                        is_progress = true;
-                        pins[i] = Some(t);
-                    } else if pins[i] != Some(t) {
-                        return Err(PinResolutionError::UnionConflict);
-                    }
-                }
-            }
-        }
-
-        trace!("static prefill progress = {is_progress}");
-        Ok(is_progress)
-    }
-
-    /// If either of the pins is `None`, they are unified to the same type.
-    /// If both are `Some`, they are validated to be the same type.
-    /// If both are None, they are left as None and false is returned.
-    /// True is returned if the types were unified by making a change.
-    /// False is returned if no change was made.
-    fn unite(
-        a: &mut Option<PrimitiveType>,
-        b: &mut Option<PrimitiveType>,
-    ) -> Result<bool, UnionConflict> {
-        if let Some(a) = a {
-            if let Some(b) = b {
-                if a != b {
-                    Err(UnionConflict)
-                } else {
-                    Ok(false)
-                }
-            } else {
-                *b = Some(a.clone());
-                Ok(true)
-            }
-        } else if let Some(b) = b {
-            *a = Some(b.clone());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Set all pins to the given value. Return true if any change was made.
-    fn set_to(
-        val: Option<PrimitiveType>,
-        a: &mut Option<PrimitiveType>,
-        b: &mut Option<PrimitiveType>,
-    ) -> bool {
-        let mut changed = false;
-        if a != &val {
-            *a = val.clone();
-            changed = true;
-        }
-        if b != &val {
-            *b = val;
-            changed = true;
-        }
-        changed
-    }
-
-    /// If `b` is `Some`, it should be equal to `a`.
-    /// Otherwise, `b` is set to `a`.
-    /// True is returned if change was made.
-    fn match_types_write(
-        a: PrimitiveType,
-        b: &mut Option<PrimitiveType>,
-    ) -> Result<bool, UnionConflict> {
-        if let Some(b) = b {
-            if &a != b {
-                return Err(UnionConflict);
-            }
-            Ok(false)
-        } else {
-            *b = Some(a);
-            Ok(true)
-        }
-    }
-
-    fn any(a: &Option<PrimitiveType>, b: &Option<PrimitiveType>) -> Option<PrimitiveType> {
-        match (a, b) {
-            (Some(a), _) => Some(a.clone()),
-            (_, Some(b)) => Some(b.clone()),
-            _ => None,
-        }
-    }
-
-    /// Check that all pins are resolved.
-    fn ensure_resolved(self) -> Result<Self, PinResolutionError> {
-        if self.is_resolved() {
-            Ok(self)
-        } else {
-            Err(PinResolutionError::RemainingUnknownPins)
-        }
-    }
-
-    pub fn is_resolved(&self) -> bool {
-        for pin in self.pins.iter() {
-            if pin.is_none() {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-struct UnionConflict;
-
-impl From<UnionConflict> for PinResolutionError {
-    fn from(_: UnionConflict) -> Self {
-        PinResolutionError::UnionConflict
-    }
-}
-
-#[derive(Debug)]
-pub enum PinResolutionError {
-    PinNumberMismatch,
-
-    /// Provided types of the pins cannot be resolved due to conflicting requirements.
-    UnionConflict,
-
-    /// Cannot resolve all pin types for lacking information.
-    RemainingUnknownPins,
+    /// Pins have constant count and probably some defined types or type hints.
+    ConstCount,
 }
 
 /// Pattern for matching values.
@@ -1758,6 +1340,255 @@ pub enum PrimitiveType {
     Option(Box<PrimitiveType>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum HintedPrimitiveType {
+    Int,
+    Uint,
+    Unit,
+    Moneraty,
+    Date,
+    DateTime,
+    Time,
+    Bool,
+    Str,
+    Ordering,
+    File,
+    Record,
+    Array(Box<HintedPrimitiveType>),
+    Result(Box<(HintedPrimitiveType, HintedPrimitiveType)>),
+    Option(Box<HintedPrimitiveType>),
+    Hint,
+}
+
+impl From<PrimitiveType> for HintedPrimitiveType {
+    fn from(pt: PrimitiveType) -> Self {
+        use PrimitiveType as PT;
+        match pt {
+            PT::Int => HintedPrimitiveType::Int,
+            PT::Uint => HintedPrimitiveType::Uint,
+            PT::Unit => HintedPrimitiveType::Unit,
+            PT::Moneraty => HintedPrimitiveType::Moneraty,
+            PT::Date => HintedPrimitiveType::Date,
+            PT::DateTime => HintedPrimitiveType::DateTime,
+            PT::Time => HintedPrimitiveType::Time,
+            PT::Bool => HintedPrimitiveType::Bool,
+            PT::Str => HintedPrimitiveType::Str,
+            PT::Ordering => HintedPrimitiveType::Ordering,
+            PT::File => HintedPrimitiveType::File,
+            PT::Record => HintedPrimitiveType::Record,
+            PT::Array(v) => HintedPrimitiveType::Array(Box::new((*v).into())),
+            PT::Result(b) => HintedPrimitiveType::Result(Box::new((b.0.into(), b.1.into()))),
+            PT::Option(v) => HintedPrimitiveType::Option(Box::new((*v).into())),
+        }
+    }
+}
+
+impl From<&PrimitiveType> for HintedPrimitiveType {
+    fn from(pt: &PrimitiveType) -> Self {
+        use PrimitiveType as PT;
+        match pt {
+            PT::Int => HintedPrimitiveType::Int,
+            PT::Uint => HintedPrimitiveType::Uint,
+            PT::Unit => HintedPrimitiveType::Unit,
+            PT::Moneraty => HintedPrimitiveType::Moneraty,
+            PT::Date => HintedPrimitiveType::Date,
+            PT::DateTime => HintedPrimitiveType::DateTime,
+            PT::Time => HintedPrimitiveType::Time,
+            PT::Bool => HintedPrimitiveType::Bool,
+            PT::Str => HintedPrimitiveType::Str,
+            PT::Ordering => HintedPrimitiveType::Ordering,
+            PT::File => HintedPrimitiveType::File,
+            PT::Record => HintedPrimitiveType::Record,
+            PT::Array(v) => HintedPrimitiveType::Array(Box::new((**v).to_owned().into())),
+            PT::Result(b) => HintedPrimitiveType::Result(Box::new((
+                b.0.to_owned().into(),
+                b.1.to_owned().into(),
+            ))),
+            PT::Option(v) => HintedPrimitiveType::Option(Box::new((**v).to_owned().into())),
+        }
+    }
+}
+
+impl From<HintedPrimitiveType> for PrimitiveType {
+    fn from(hpt: HintedPrimitiveType) -> Self {
+        use HintedPrimitiveType as HPT;
+        match hpt {
+            HPT::Int => PrimitiveType::Int,
+            HPT::Uint => PrimitiveType::Uint,
+            HPT::Unit => PrimitiveType::Unit,
+            HPT::Moneraty => PrimitiveType::Moneraty,
+            HPT::Date => PrimitiveType::Date,
+            HPT::DateTime => PrimitiveType::DateTime,
+            HPT::Time => PrimitiveType::Time,
+            HPT::Bool => PrimitiveType::Bool,
+            HPT::Str => PrimitiveType::Str,
+            HPT::Ordering => PrimitiveType::Ordering,
+            HPT::File => PrimitiveType::File,
+            HPT::Record => PrimitiveType::Record,
+            HPT::Array(v) => PrimitiveType::Array(Box::new((*v).into())),
+            HPT::Result(b) => PrimitiveType::Result(Box::new((b.0.into(), b.1.into()))),
+            HPT::Option(v) => PrimitiveType::Option(Box::new((*v).into())),
+            HPT::Hint => {
+                panic!("correct type resolver should not pass naked Hint into resolved type")
+            }
+        }
+    }
+}
+
+impl HintedPrimitiveType {
+    /// Whether the types are compatible. This means they should be equal if neither is a hint,
+    /// or if any one is a hint, whether the known parts are equal, ignoring unknown parts.
+    pub fn is_compatible(&self, with: &Self) -> bool {
+        use HintedPrimitiveType as HPT;
+        match (self, with) {
+            (HPT::Int, HPT::Int)
+            | (HPT::Uint, HPT::Uint)
+            | (HPT::Unit, HPT::Unit)
+            | (HPT::Moneraty, HPT::Moneraty)
+            | (HPT::Date, HPT::Date)
+            | (HPT::DateTime, HPT::DateTime)
+            | (HPT::Time, HPT::Time)
+            | (HPT::Bool, HPT::Bool)
+            | (HPT::Str, HPT::Str)
+            | (HPT::Ordering, HPT::Ordering)
+            | (HPT::File, HPT::File)
+            | (HPT::Record, HPT::Record)
+            | (HPT::Hint, _) => true,
+            (HPT::Array(a), HPT::Array(b)) => a.is_compatible(b),
+            (HPT::Result(a), HPT::Result(b)) => a.0.is_compatible(&b.0) && a.1.is_compatible(&b.1),
+            (HPT::Option(a), HPT::Option(b)) => a.is_compatible(b),
+            _ => false,
+        }
+    }
+
+    /// This type precision compared to another.
+    pub fn precision(&self, other: &Self) -> TypePrecision {
+        use HintedPrimitiveType as HPT;
+        use TypePrecision::*;
+
+        match (self, other) {
+            (HPT::Int, HPT::Int)
+            | (HPT::Uint, HPT::Uint)
+            | (HPT::Unit, HPT::Unit)
+            | (HPT::Moneraty, HPT::Moneraty)
+            | (HPT::Date, HPT::Date)
+            | (HPT::DateTime, HPT::DateTime)
+            | (HPT::Time, HPT::Time)
+            | (HPT::Bool, HPT::Bool)
+            | (HPT::Str, HPT::Str)
+            | (HPT::Ordering, HPT::Ordering)
+            | (HPT::File, HPT::File)
+            | (HPT::Record, HPT::Record)
+            | (HPT::Hint, HPT::Hint) => Same,
+            (HPT::Hint, _) => Uncertain,
+            (HPT::Array(a), HPT::Array(b)) => a.precision(b),
+            (HPT::Result(a), HPT::Result(b)) => {
+                let a0 = a.0.precision(&b.0);
+                let a1 = a.1.precision(&b.1);
+                match (a0, a1) {
+                    (Same, Same) => Same,
+                    (Incompatible, _) | (_, Incompatible) => Incompatible,
+                    (Precise, _) | (_, Precise) => Precise,
+                    (Uncertain, _) | (_, Uncertain) => Uncertain,
+                }
+            }
+            (HPT::Option(a), HPT::Option(b)) => a.precision(b),
+            _ => Incompatible,
+        }
+    }
+
+    /// Make a more defined type from two types. This is used to clarify types
+    /// when they are compatible, but one is more precise than the other. This replaces
+    /// hints with actual types where applicable. If types are equal, unchanged type is returned.
+    /// On error, returns original `self` type.
+    ///
+    /// [TypePrecision] returned indicates whether the type got more precise, did not improve
+    /// ([TypePrecision::Same]) or the types are incompatible ([TypePrecision::Incompatible]).
+    /// Returns [TypePrecision::Uncertain] if the types are compatible,
+    /// but given value is less certain and was useless for improvements.
+    pub fn clarify(&self, other: &Self) -> (Self, TypePrecision) {
+        use HintedPrimitiveType as HPT;
+        use TypePrecision::*;
+
+        match (self, other) {
+            (HPT::Int, HPT::Int)
+            | (HPT::Uint, HPT::Uint)
+            | (HPT::Unit, HPT::Unit)
+            | (HPT::Moneraty, HPT::Moneraty)
+            | (HPT::Date, HPT::Date)
+            | (HPT::DateTime, HPT::DateTime)
+            | (HPT::Time, HPT::Time)
+            | (HPT::Bool, HPT::Bool)
+            | (HPT::Str, HPT::Str)
+            | (HPT::Ordering, HPT::Ordering)
+            | (HPT::File, HPT::File)
+            | (HPT::Record, HPT::Record)
+            | (HPT::Hint, HPT::Hint) => (self.clone(), Same),
+            (HPT::Hint, _) => (other.clone(), Precise),
+            (_, HPT::Hint) => (self.clone(), Uncertain),
+            (HPT::Array(a), HPT::Array(b)) => {
+                let (clarified, precision) = a.clarify(b);
+                (HPT::Array(Box::new(clarified)), precision)
+            }
+            (HPT::Result(a), HPT::Result(b)) => {
+                let (a0, p0) = a.0.clarify(&b.0);
+                let (a1, p1) = a.1.clarify(&b.1);
+                let p = match (p0, p1) {
+                    (Same, Same) => Same,
+                    (Incompatible, _) | (_, Incompatible) => Incompatible,
+                    (Precise, _) | (_, Precise) => Precise,
+                    (Uncertain, _) | (_, Uncertain) => Uncertain,
+                };
+                (HPT::Result(Box::new((a0, a1))), p)
+            }
+            (HPT::Option(a), HPT::Option(b)) => {
+                let (clarified, precision) = a.clarify(b);
+                (HPT::Option(Box::new(clarified)), precision)
+            }
+            _ => (self.clone(), Incompatible),
+        }
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        use HintedPrimitiveType as HPT;
+        match self {
+            HPT::Int
+            | HPT::Uint
+            | HPT::Unit
+            | HPT::Moneraty
+            | HPT::Date
+            | HPT::DateTime
+            | HPT::Time
+            | HPT::Bool
+            | HPT::Str
+            | HPT::Ordering
+            | HPT::File
+            | HPT::Record => true,
+            HPT::Array(v) => v.is_resolved(),
+            HPT::Result(boxed) => boxed.0.is_resolved() && boxed.1.is_resolved(),
+            HPT::Option(v) => v.is_resolved(),
+            HPT::Hint => false,
+        }
+    }
+}
+
+/// Precision to compare two types, whether they are compatible, one can clarify the other,
+/// or they are incompatible at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TypePrecision {
+    /// The types are incompatible.
+    Incompatible,
+
+    /// The type is less precise than the other type.
+    Uncertain,
+
+    /// The type is the same.
+    Same,
+
+    /// The type is more precise than the other type.
+    Precise,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveTypeConst {
     Int,
@@ -1775,27 +1606,35 @@ pub enum PrimitiveTypeConst {
     Array(&'static PrimitiveTypeConst),
     Result((&'static PrimitiveTypeConst, &'static PrimitiveTypeConst)),
     Option(&'static PrimitiveTypeConst),
+
+    /// Special type to sign a hint for type resolver. It does not convert into an actual
+    /// type outside the const scope.
+    ///
+    /// During conversion via [From] implementation, this is converted into [PrimitiveType::Unit].
+    Hint,
 }
 
-impl From<PrimitiveTypeConst> for PrimitiveType {
+impl From<PrimitiveTypeConst> for HintedPrimitiveType {
     fn from(pt: PrimitiveTypeConst) -> Self {
+        use HintedPrimitiveType as HPT;
         use PrimitiveTypeConst as PT;
         match pt {
-            PT::Int => PrimitiveType::Int,
-            PT::Uint => PrimitiveType::Uint,
-            PT::Unit => PrimitiveType::Unit,
-            PT::Moneraty => PrimitiveType::Moneraty,
-            PT::Date => PrimitiveType::Date,
-            PT::DateTime => PrimitiveType::DateTime,
-            PT::Time => PrimitiveType::Time,
-            PT::Bool => PrimitiveType::Bool,
-            PT::Str => PrimitiveType::Str,
-            PT::Ordering => PrimitiveType::Ordering,
-            PT::File => PrimitiveType::File,
-            PT::Record => PrimitiveType::Record,
-            PT::Array(&v) => PrimitiveType::Array(Box::new(v.into())),
-            PT::Result((&a, &b)) => PrimitiveType::Result(Box::new((a.into(), b.into()))),
-            PT::Option(&v) => PrimitiveType::Option(Box::new(v.into())),
+            PT::Int => HPT::Int,
+            PT::Uint => HPT::Uint,
+            PT::Unit => HPT::Unit,
+            PT::Moneraty => HPT::Moneraty,
+            PT::Date => HPT::Date,
+            PT::DateTime => HPT::DateTime,
+            PT::Time => HPT::Time,
+            PT::Bool => HPT::Bool,
+            PT::Str => HPT::Str,
+            PT::Ordering => HPT::Ordering,
+            PT::File => HPT::File,
+            PT::Record => HPT::Record,
+            PT::Array(v) => HPT::Array(Box::new((*v).into())),
+            PT::Result((a, b)) => HPT::Result(Box::new(((*a).into(), (*b).into()))),
+            PT::Option(v) => HPT::Option(Box::new((*v).into())),
+            PT::Hint => HPT::Hint,
         }
     }
 }

@@ -6,7 +6,7 @@ pub mod canvas;
 
 pub mod table_data;
 
-pub mod valid;
+// pub mod valid;
 
 #[cfg(test)]
 mod tests {
