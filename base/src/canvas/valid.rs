@@ -980,26 +980,18 @@ impl<'pins> ResolvePinTypes<'pins> {
                             assert_eq!(outs.len(), 1);
 
                             // Get a known type in any of the pins.
-                            let detect = {
-                                let mut detect = None;
-                                for i in ins.iter().chain(outs.iter()) {
-                                    if let Some(i) = i {
-                                        detect = Some(i);
-                                        break;
-                                    }
-                                }
-                                detect
-                            };
-
-                            if let Some(detect) = detect.map(ToOwned::to_owned) {
-                                for i in ins.iter_mut() {
-                                    is_progress |=
-                                        ResolvePinTypes::match_types_write(detect.clone(), i)?;
-                                }
-
-                                is_progress |=
-                                    ResolvePinTypes::match_types_write(detect, &mut outs[0])?;
+                            trace!("ExpectSome: get a known type in any of the pins");
+                            let mut detect = outs[0].clone();
+                            for i in ins.iter_mut() {
+                                is_progress |= AssignedType::union(&mut detect, i).is_progress();
                             }
+
+                            trace!("Propagate detected type to all pins: {detect:#?}");
+                            for i in ins.iter_mut() {
+                                is_progress |= AssignedType::union(&mut detect, i).is_progress();
+                            }
+                            is_progress |=
+                                AssignedType::union(&mut detect, &mut outs[0]).is_progress();
 
                             Self { pins, is_progress }
                         }
