@@ -181,6 +181,21 @@ impl AssignedType {
         }
     }
 
+    /// The same as [AssignedType::match_or_write] but forces second argument to
+    /// be equal to a given type, overriding any existing errors.
+    fn force_match_or_write(
+        a: HintedPrimitiveType,
+        b: &mut AssignedType,
+    ) -> Result<bool, UnionConflict> {
+        let is_eq = b.ty.as_ref().map_or(false, |v| *v == a);
+        if is_eq {
+            return Ok(false);
+        } else {
+            b.ty = Ok(a);
+            Ok(true)
+        }
+    }
+
     /// Return the new, most precise type calculated from both present types.
     /// If any is unknown, the other is returned. If both are unknown,
     /// [HintedPrimitiveType::Hint] is returned.
@@ -998,18 +1013,134 @@ impl<'pins> ResolvePinTypes<'pins> {
                         Match { .. } => todo!(),
                         Func { .. } => todo!(),
                         Constant(value) => {
-                            let ty = value.type_of();
+                            let ty = value.type_of().into();
                             assert_eq!(pins.len(), 1);
-                            is_progress |= ResolvePinTypes::match_types_write(ty, &mut pins[0])?;
+                            is_progress |=
+                                AssignedType::match_or_write(ty, &mut pins[0]).is_progress();
 
                             Self { pins, is_progress }
                         }
-                        _ => Self { pins, is_progress },
+                        _ => unreachable!("unhandled dynamic IO relation"),
                     }
+                }
+                IoRelation::Defined => {
+                    // All pins known from constant scope.
+                    let inputs = node.static_inputs().unwrap();
+                    let outputs = node.static_outputs().unwrap();
+
+                    let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                    assert_eq!(ins.len(), inputs.len());
+                    assert_eq!(outs.len(), outputs.len());
+
+                    for (const_input, target_input) in inputs.iter().copied().zip(ins.iter_mut()) {
+                        let set_to = const_input.into();
+                        is_progress |=
+                            AssignedType::force_match_or_write(set_to, target_input).is_progress();
+                    }
+
+                    for (const_output, target_output) in
+                        outputs.iter().copied().zip(outs.iter_mut())
+                    {
+                        let set_to = const_output.into();
+                        is_progress |=
+                            AssignedType::force_match_or_write(set_to, target_output).is_progress();
+                    }
+
+                    Self { pins, is_progress }
                 }
                 IoRelation::ConstCount => {
                     use NodeStub::*;
-                    todo!()
+
+                    match node {
+                        Drop | Output { .. } | Crash { .. } => {
+                            // Unresolvable without external information.
+                            trace!("Is not a resolvable node, skipping: {node:?}");
+                            Self { pins, is_progress }
+                        }
+                        ExpectSome { .. } => {
+                            let const_input = node.static_inputs().unwrap().first().unwrap().into();
+                            let const_output =
+                                node.static_outputs().unwrap().first().unwrap().into();
+                            let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                            assert_eq!(ins.len(), 1);
+                            assert_eq!(outs.len(), 1);
+
+                            trace!(
+                                "ExpectSome: resolve inner type of input Option or type of output"
+                            );
+                            let inner = {
+                                let input = ins.first_mut().unwrap();
+                                let output = outs.first_mut().unwrap();
+                                let mut inner = output;
+
+                                if let Some(ty) = input.opt_ty() {
+                                    if let HintedPrimitiveType::Option(ty) = ty {
+                                        let mut v = AssignedType::with(**ty);
+                                        is_progress |=
+                                            AssignedType::union(&mut inner, &mut v).is_progress();
+                                    } else {
+                                        trace!("Input is not an Option, but expected one");
+                                        output.mark_err();
+                                    }
+                                }
+
+                                inner.to_owned()
+                            };
+
+                            if let Some(inner) = inner.opt_ty() {
+                                trace!("Inner type is resolved as: {inner:#?}");
+                                is_progress |= AssignedType::force_match_or_write(
+                                    HintedPrimitiveType::Option(Box::new(inner.to_owned())),
+                                    &mut outs[0],
+                                )
+                                .is_progress();
+
+                                is_progress |=
+                                    AssignedType::force_match_or_write(const_input, &mut ins[0])
+                                        .is_progress();
+                            }
+
+                            Self { pins, is_progress }
+                        }
+                        Constant(v) => {
+                            let ty = v.type_of().into();
+                            let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                            assert_eq!(ins.len(), 0);
+                            assert_eq!(outs.len(), 1);
+
+                            is_progress |=
+                                AssignedType::force_match_or_write(ty, &mut outs[0]).is_progress();
+
+                            Self { pins, is_progress }
+                        }
+                        OkOrCrash { .. } => {
+                            let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+                            assert_eq!(ins.len(), 1);
+                            assert_eq!(outs.len(), 1);
+
+                            trace!("OkOrCrash: resolve inner type of input Result or type of output");
+                            let mut ty = outs[0].clone();
+                            if let Some(out) = ty.opt_ty() {
+                                let mut input = AssignedType::with(HintedPrimitiveType::Result(
+                                    Box::new((out.to_owned(), HintedPrimitiveType::Hint)),
+                                ));
+                                is_progress |=
+                                    AssignedType::union(&mut ty, &mut input).is_progress();
+                            }
+                            if let Some(inp) = ins[0].opt_ty() {
+                                if let HintedPrimitiveType::Result(boxed) = inp {
+                                    let (ok, _) = &**boxed;
+                                    is_progress |=
+                                        AssignedType::match_or_write(ok.to_owned(), &mut ty)
+                                            .is_progress();
+                                }
+                            }
+                            trace!("OkOrCrash: resolved type: {:#?}", outs[0].opt_ty());
+
+                            Self { pins, is_progress }
+                        }
+                        _ => unreachable!("unhandled const count relation"),
+                    }
                 }
             }
         };

@@ -870,41 +870,41 @@ impl NodeStub {
     /// Returns `None` if the outputs cannot be determined statically.
     /// Returned slice contains `None` for each output pin that cannot be determined statically,
     /// otherwise contains `Some` with the type of the output pin.
-    pub const fn static_outputs(&self) -> Option<&'static [Option<PrimitiveTypeConst>]> {
+    pub const fn static_outputs(&self) -> Option<&'static [PrimitiveTypeConst]> {
         use NodeStub::*;
         use PrimitiveTypeConst as PT;
-        let some: &[Option<PT>] = match self {
-            File => &[Some(PT::File)],
-            SplitBy { .. } => &[Some(PT::Array(&PT::Record))],
-            Input { .. } => &[Some(PT::Str)],
+        let some: &[PT] = match self {
+            File => &[PT::File],
+            SplitBy { .. } => &[PT::Array(&PT::Record)],
+            Input { .. } => &[PT::Str],
             Drop => &[],
             Output { .. } => &[],
-            StrOp(_) => &[Some(PT::Str)],
-            Compare { .. } => &[Some(PT::Bool)],
-            Ordering => &[Some(PT::Ordering)],
+            StrOp(_) => &[PT::Str],
+            Compare { .. } => &[PT::Bool],
+            Ordering => &[PT::Ordering],
             Regex(_) => return None,
-            FindRecord(_) => &[Some(PT::Result((&(PT::Array(&PT::Record)), &PT::Unit)))],
+            FindRecord(_) => &[PT::Result((&(PT::Array(&PT::Record)), &PT::Unit))],
             Map { .. } => return None,
             List { .. } => return None,
             IfElse { .. } => return None,
-            OkOrErr => &[None, None],
+            OkOrErr => &[PT::Hint, PT::Hint],
             Validate { .. } => return None,
-            SelectFirst { .. } => &[None],
-            ExpectOne { .. } => &[Some(PT::Result((&PT::Hint, &PT::Hint)))],
-            ExpectSome { .. } => &[None],
+            SelectFirst { .. } => &[PT::Hint],
+            ExpectOne { .. } => &[PT::Result((&PT::Hint, &PT::Hint))],
+            ExpectSome { .. } => &[PT::Hint],
             Match { .. } => return None,
             Func(_) => return None,
             ParseDateTime { date, time, .. } => match (date, time) {
-                (true, false) => &[Some(PT::Result((&(PT::Date), &PT::Unit)))],
-                (false, true) => &[Some(PT::Result((&PT::Time, &PT::Unit)))],
-                (true, true) => &[Some(PT::Result((&PT::DateTime, &PT::Unit)))],
-                (false, false) => &[Some(PT::Result((&PT::Unit, &PT::Unit)))],
+                (true, false) => &[PT::Result((&(PT::Date), &PT::Unit))],
+                (false, true) => &[PT::Result((&PT::Time, &PT::Unit))],
+                (true, true) => &[PT::Result((&PT::DateTime, &PT::Unit))],
+                (false, false) => &[PT::Result((&PT::Unit, &PT::Unit))],
             },
-            ParseMonetary { .. } => &[Some(PT::Result((&PT::Moneraty, &PT::Unit)))],
-            ParseInt { .. } => &[Some(PT::Result((&PT::Int, &PT::Unit)))],
-            Constant(_) => &[None],
+            ParseMonetary { .. } => &[PT::Result((&PT::Moneraty, &PT::Unit))],
+            ParseInt { .. } => &[PT::Result((&PT::Int, &PT::Unit))],
+            Constant(_) => &[PT::Hint],
             Crash { .. } => &[],
-            OkOrCrash { .. } => &[None],
+            OkOrCrash { .. } => &[PT::Hint],
             Unreachable { .. } => &[],
             Todo { .. } => return None,
             Comment { .. } => return None,
@@ -921,9 +921,9 @@ impl NodeStub {
         use NodeStub::*;
 
         let v = match self {
-            File => ConstCount,
+            File => Defined,
             SplitBy { .. } => Dynamic,
-            Input { .. } => ConstCount,
+            Input { .. } => Defined,
             Drop => ConstCount,
             Output { .. } => ConstCount,
             StrOp(_) => FullSymmetry,
@@ -941,9 +941,9 @@ impl NodeStub {
             ExpectSome { .. } => ConstCount,
             Match { .. } => Dynamic,
             Func(_) => Dynamic,
-            ParseDateTime { .. } => ConstCount,
-            ParseMonetary { .. } => ConstCount,
-            ParseInt { .. } => ConstCount,
+            ParseDateTime { .. } => Defined,
+            ParseMonetary { .. } => Defined,
+            ParseInt { .. } => Defined,
             Constant(_) => ConstCount,
             Crash { .. } => ConstCount,
             OkOrCrash { .. } => ConstCount,
@@ -966,37 +966,37 @@ impl NodeStub {
     /// Returns `None` if the inputs cannot be determined statically.
     /// Returned slice contains `None` for each input pin that cannot be determined statically,
     /// otherwise contains `Some` with the type of the input pin.
-    pub const fn static_inputs(&self) -> Option<&'static [Option<PrimitiveTypeConst>]> {
+    pub const fn static_inputs(&self) -> Option<&'static [PrimitiveTypeConst]> {
         use NodeStub::*;
         use PrimitiveTypeConst as PT;
-        let some: &[Option<PT>] = match self {
+        let some: &[PT] = match self {
             File => &[],
-            SplitBy { .. } => &[Some(PT::Record)],
-            Input { .. } => &[Some(PT::File)],
+            SplitBy { .. } => &[PT::Record],
+            Input { .. } => &[PT::File],
             Drop => &[],
-            Output { .. } => &[None],
-            StrOp(_) => &[Some(PT::Str)],
-            Compare { .. } => &[None, None],
-            Ordering => &[None, None],
-            Regex(_) => &[Some(PT::Str)],
-            FindRecord(_) => &[Some(PT::File)],
+            Output { .. } => &[PT::Hint],
+            StrOp(_) => &[PT::Str],
+            Compare { .. } => &[PT::Hint, PT::Hint],
+            Ordering => &[PT::Hint, PT::Hint],
+            Regex(_) => &[PT::Str],
+            FindRecord(_) => &[PT::File],
             Map { .. } => return None,
             List { .. } => return None,
             IfElse { .. } => return None,
-            OkOrErr => &[None],
+            OkOrErr => &[PT::Hint],
             Validate { .. } => return None,
             SelectFirst { .. } => return None,
             ExpectOne { .. } => return None,
-            ExpectSome { .. } => &[Some(PT::Option(&PT::Hint))],
+            ExpectSome { .. } => &[PT::Option(&PT::Hint)],
             Match { .. } => return None,
             Func(_) => return None,
-            ParseDateTime { .. } => &[Some(PT::Str)],
-            ParseMonetary { .. } => &[Some(PT::Str)],
-            ParseInt { .. } => &[Some(PT::Str)],
+            ParseDateTime { .. } => &[PT::Str],
+            ParseMonetary { .. } => &[PT::Str],
+            ParseInt { .. } => &[PT::Str],
             Constant(_) => &[],
-            Crash { .. } => &[None],
-            OkOrCrash { .. } => &[None],
-            Unreachable { .. } => &[None],
+            Crash { .. } => &[PT::Hint],
+            OkOrCrash { .. } => &[PT::Result((&PT::Hint, &PT::Hint))],
+            Unreachable { .. } => &[PT::Hint],
             Todo { .. } => return None,
             Comment { .. } => return None,
         };
@@ -1185,6 +1185,9 @@ pub enum IoRelation {
 
     /// Pins have constant count and probably some defined types or type hints.
     ConstCount,
+
+    /// All pin types are fully determined in the constant scope.
+    Defined,
 }
 
 /// Pattern for matching values.
