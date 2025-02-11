@@ -953,32 +953,24 @@ impl<'pins> ResolvePinTypes<'pins> {
                             let (ins, outs) = Self::pin_io_slices_mut(pins, node);
                             assert_eq!(outs.len(), 1);
 
-                            // Get a known type in any of the input pins.
-                            let detect = {
-                                let mut detect = None;
-                                for i in ins.iter() {
-                                    if let Some(i) = i {
-                                        detect = Some(i);
-                                        break;
-                                    }
-                                }
-                                detect
-                            };
-
-                            if let Some(detect) = detect.map(ToOwned::to_owned) {
-                                for i in ins.iter_mut() {
-                                    is_progress |=
-                                        ResolvePinTypes::match_types_write(detect.clone(), i)?;
-                                }
-
-                                let out = PrimitiveType::Result(Box::new((
-                                    detect.clone(),
-                                    PrimitiveType::Array(Box::new(detect)),
-                                )));
-
-                                is_progress |=
-                                    ResolvePinTypes::match_types_write(out, &mut outs[0])?;
+                            trace!("ExpectOne: get a known type in any of the input pins");
+                            let mut detect = AssignedType::new();
+                            for i in ins.iter_mut() {
+                                is_progress |= AssignedType::union(&mut detect, i);
                             }
+                            trace!("Detected type for propagation: {detect:#?}");
+
+                            trace!("Propagete detected type to all input pins");
+                            for i in ins.iter_mut() {
+                                is_progress |= AssignedType::union(&mut detect, i)
+                            }
+
+                            // Output should be Result<type, Array<type>>.
+                            trace!("Propagate detected transformed type to the output pin");
+                            let inner = detect.to_ty_or_hint();
+                            let array = HintedPrimitiveType::Array(Box::new(inner.clone()));
+                            let result = HintedPrimitiveType::Result(Box::new((inner, array)));
+                            is_progress |= AssignedType::match_or_write(result, &mut outs[0])?;
 
                             Self { pins, is_progress }
                         }
