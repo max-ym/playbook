@@ -775,23 +775,41 @@ impl<'pins> ResolvePinTypes<'pins> {
                             //    output are not an Option, they should be this inner type.
 
                             // #1
+                            trace!("SelectFirst 1: check first input pin and output pin have the same type");
                             if let (Some(i), Some(o)) = (ins.first_mut(), outs.last_mut()) {
-                                is_progress |= AssignedType::union(i, o).is_progress();
+                                let p = AssignedType::union(i, o).is_progress();
+                                if p {
+                                    trace!("Resolution progress of 1st in and out pins: {i:?}")
+                                }
+                                is_progress |= p;
                             }
 
                             // #2
+                            trace!(
+                                "SelectFirst 2: all except the first input pins should be Options"
+                            );
                             let mut opt = AssignedType::with(HintedPrimitiveType::Option(
                                 Box::new(HintedPrimitiveType::Unit),
                             ));
                             let mut local_progress = false;
                             for _ in 0..=1 {
                                 for i in ins.iter_mut().skip(1) {
-                                    local_progress |=
-                                        AssignedType::union(i, &mut opt).is_progress();
+                                    let p = AssignedType::union(i, &mut opt).is_progress();
+                                    if p {
+                                        trace!("Resolution progress of Option pin: {i:?}");
+                                    }
+                                    local_progress |= p;
                                 }
                                 if !local_progress {
                                     // Second iteration won't propagate any new information.
+                                    trace!("Second iteration not needed");
                                     break;
+                                } else {
+                                    // 'opt' now has the best possible information about
+                                    // the inner type of the Option. We will re-run the
+                                    // loop to populate all pins with this information (except
+                                    // for erroneous ones).
+                                    trace!("Second iteration will be ran");
                                 }
                             }
                             is_progress |= local_progress;
@@ -802,15 +820,21 @@ impl<'pins> ResolvePinTypes<'pins> {
                             let is_out_opt = outs.last().map(|o| {
                                 matches!(o.opt_ty(), Some(HintedPrimitiveType::Option(_)))
                             });
+                            trace!(
+                                "First input is Option: {is_first_opt:?}, output is Option: {is_out_opt:?}"
+                            );
 
                             // #3
+                            trace!("SelectFirst 3: all pins should have the same inner type");
                             let mut inner = 'inner: {
                                 // At this point, "opt" variable has high chance of being
                                 // already resolved.
                                 if opt.is_resolved() {
+                                    trace!("Option type is resolved, unwrap its inner type");
                                     // Unwrap from option and return.
                                     if let HintedPrimitiveType::Option(inner) = opt.to_ty_or_hint()
                                     {
+                                        trace!("Resolved inner type: {inner:#?}");
                                         break 'inner AssignedType::with(*inner);
                                     } else {
                                         unreachable!(
@@ -820,24 +844,50 @@ impl<'pins> ResolvePinTypes<'pins> {
                                 }
 
                                 // If the first input is not an Option, we can use it as the inner type.
+                                trace!("Option type is not resolved, try to use the first input pin's type");
                                 if let Some(false) = is_first_opt {
                                     if let Some(ty) = ins.first().and_then(|i| i.opt_ty()) {
+                                        trace!("Used first input pin as inner type: {ty:#?}");
                                         break 'inner AssignedType::with(*ty);
+                                    } else {
+                                        // Maybe pin is in error?
+                                        trace!(
+                                            "Not used first input pin due to invalid associated state"
+                                        );
                                     }
-                                }
-                                // Try to use the output's optional type's inner type.
-                                if let Some(false) = is_out_opt {
-                                    if let Some(ty) = outs.last().and_then(|o| o.opt_ty()) {
-                                        break 'inner AssignedType::with(*ty);
-                                    }
+                                } else {
+                                    trace!("Not used first input pin due to unuseful types");
                                 }
 
+                                trace!(
+                                    "Option type is not resolved, try to use the output pin's type"
+                                );
+                                if let Some(false) = is_out_opt {
+                                    if let Some(ty) = outs.last().and_then(|o| o.opt_ty()) {
+                                        trace!("Used output pin as inner type: {ty:#?}");
+                                        break 'inner AssignedType::with(*ty);
+                                    } else {
+                                        // Maybe pin is in error?
+                                        trace!(
+                                            "Not used output pin as inner type due to invalid associated state"
+                                        );
+                                    }
+                                } else {
+                                    trace!(
+                                        "Not used output pin as inner type due to unuseful types"
+                                    );
+                                }
+
+                                trace!("Inner type is not resolved");
                                 AssignedType::default()
                             };
 
                             // Try to give more precise information about the inner type to
                             // our Option-holding variable.
                             if let Some(inner) = inner.opt_ty() {
+                                trace!(
+                                    "There's some information about inner type for propagation into Option variant: {inner:#?}"
+                                );
                                 is_progress |= AssignedType::union(
                                     &mut AssignedType::with(HintedPrimitiveType::Option(Box::new(
                                         inner.to_owned(),
@@ -848,19 +898,23 @@ impl<'pins> ResolvePinTypes<'pins> {
                             }
 
                             // Propagate the inner type (without a wrapper when applicable) to all pins.
+                            trace!("Propagate inner type to all pins");
 
                             // Repeat option union as our option should now be the best guess.
+                            trace!("Repeat Option union for all pins");
                             for i in ins.iter_mut().skip(1) {
                                 is_progress |= AssignedType::union(i, &mut opt).is_progress();
                             }
                             // Set the correct first pin, which may or may not be option.
                             match is_first_opt {
                                 Some(true) => {
+                                    trace!("First input pin is Option");
                                     is_progress |=
                                         AssignedType::union(ins.first_mut().unwrap(), &mut opt)
                                             .is_progress();
                                 }
                                 Some(false) => {
+                                    trace!("First input pin is not Option");
                                     is_progress |=
                                         AssignedType::union(ins.first_mut().unwrap(), &mut inner)
                                             .is_progress();
@@ -868,25 +922,28 @@ impl<'pins> ResolvePinTypes<'pins> {
                                 None => {
                                     // Do nothing, as we don't know the first pin type for sure,
                                     // it could be either Option or not.
+                                    trace!("First input pin type is not evident");
                                 }
                             }
                             match is_out_opt.or(is_first_opt) {
                                 Some(true) => {
+                                    trace!("Output pin is Option");
                                     is_progress |=
-                                        AssignedType::union(&mut outs[0], &mut opt)
-                                            .is_progress();
+                                        AssignedType::union(&mut outs[0], &mut opt).is_progress();
                                 }
                                 Some(false) => {
+                                    trace!("Output pin is not Option");
                                     is_progress |=
-                                        AssignedType::union(&mut outs[0], &mut inner)
-                                            .is_progress();
+                                        AssignedType::union(&mut outs[0], &mut inner).is_progress();
                                 }
                                 None => {
                                     // Do nothing, as we don't know the output pin type for sure,
                                     // it could be either Option or not.
+                                    trace!("Output pin type is not evident");
                                 }
                             }
 
+                            trace!("SelectFirst summary: progress {is_progress}, {pins:#?}");
                             Self { pins, is_progress }
                         }
                         ExpectOne { .. } => {
