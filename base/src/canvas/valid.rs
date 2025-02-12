@@ -181,21 +181,6 @@ impl AssignedType {
         }
     }
 
-    /// The same as [AssignedType::match_or_write] but forces second argument to
-    /// be equal to a given type, overriding any existing errors.
-    fn force_match_or_write(
-        a: HintedPrimitiveType,
-        b: &mut AssignedType,
-    ) -> Result<bool, UnionConflict> {
-        let is_eq = b.ty.as_ref().map_or(false, |v| *v == a);
-        if is_eq {
-            return Ok(false);
-        } else {
-            b.ty = Ok(a);
-            Ok(true)
-        }
-    }
-
     /// Return the new, most precise type calculated from both present types.
     /// If any is unknown, the other is returned. If both are unknown,
     /// [HintedPrimitiveType::Hint] is returned.
@@ -625,6 +610,8 @@ impl<'pins> ResolvePinTypes<'pins> {
             // Fuse for nodes without pins.
             // This prevents issues with those rules that expect there's at least
             // something to resolve.
+            // Such nodes can happen when, for example, Match node has no variants not
+            // wildcard, so effectively it does not receive or output any data.
             return Ok(Self {
                 pins,
                 is_progress: false,
@@ -633,7 +620,7 @@ impl<'pins> ResolvePinTypes<'pins> {
 
         let mut is_progress = ResolvePinTypes::prefill_with_static(node, pins)?;
 
-        let result = 'result: {
+        let result = {
             match node.static_io_relation() {
                 IoRelation::Same(pairs) => {
                     for &(i, o) in pairs {
@@ -854,7 +841,7 @@ impl<'pins> ResolvePinTypes<'pins> {
                                 if let Some(false) = is_first_opt {
                                     if let Some(ty) = ins.first().and_then(|i| i.opt_ty()) {
                                         trace!("Used first input pin as inner type: {ty:#?}");
-                                        break 'inner AssignedType::with(*ty);
+                                        break 'inner AssignedType::with(ty.to_owned());
                                     } else {
                                         // Maybe pin is in error?
                                         trace!(
@@ -871,7 +858,7 @@ impl<'pins> ResolvePinTypes<'pins> {
                                 if let Some(false) = is_out_opt {
                                     if let Some(ty) = outs.last().and_then(|o| o.opt_ty()) {
                                         trace!("Used output pin as inner type: {ty:#?}");
-                                        break 'inner AssignedType::with(*ty);
+                                        break 'inner AssignedType::with(ty.to_owned());
                                     } else {
                                         // Maybe pin is in error?
                                         trace!(
@@ -1050,7 +1037,7 @@ impl<'pins> ResolvePinTypes<'pins> {
 
                             Self { pins, is_progress }
                         }
-                        Func(predicate) => {
+                        Func(_) => {
                             trace!("Func: unresolvable within local resolver");
                             Self { pins, is_progress }
                         }
@@ -1077,7 +1064,7 @@ impl<'pins> ResolvePinTypes<'pins> {
                     for (const_input, target_input) in inputs.iter().copied().zip(ins.iter_mut()) {
                         let set_to = const_input.into();
                         is_progress |=
-                            AssignedType::force_match_or_write(set_to, target_input).is_progress();
+                            AssignedType::match_or_write(set_to, target_input).is_progress();
                     }
 
                     for (const_output, target_output) in
@@ -1085,7 +1072,7 @@ impl<'pins> ResolvePinTypes<'pins> {
                     {
                         let set_to = const_output.into();
                         is_progress |=
-                            AssignedType::force_match_or_write(set_to, target_output).is_progress();
+                            AssignedType::match_or_write(set_to, target_output).is_progress();
                     }
 
                     Self { pins, is_progress }
@@ -1101,7 +1088,6 @@ impl<'pins> ResolvePinTypes<'pins> {
                         }
                         ExpectSome { .. } => {
                             let const_input = *node.static_inputs().unwrap().first().unwrap();
-                            let const_output = *node.static_outputs().unwrap().first().unwrap();
                             let (ins, outs) = Self::pin_io_slices_mut(pins, node);
                             assert_eq!(ins.len(), 1);
                             assert_eq!(outs.len(), 1);
@@ -1112,31 +1098,30 @@ impl<'pins> ResolvePinTypes<'pins> {
                             let inner = {
                                 let input = ins.first_mut().unwrap();
                                 let output = outs.first_mut().unwrap();
-                                let mut inner = output;
 
                                 if let Some(ty) = input.opt_ty() {
                                     if let HintedPrimitiveType::Option(ty) = ty {
-                                        let mut v = AssignedType::with(**ty);
+                                        let mut v = AssignedType::with((**ty).to_owned());
                                         is_progress |=
-                                            AssignedType::union(&mut inner, &mut v).is_progress();
+                                            AssignedType::union(output, &mut v).is_progress();
                                     } else {
                                         trace!("Input is not an Option, but expected one");
                                         output.mark_err();
                                     }
                                 }
 
-                                inner.to_owned()
+                                output.to_owned()
                             };
 
                             if let Some(inner) = inner.opt_ty() {
                                 trace!("Inner type is resolved as: {inner:#?}");
-                                is_progress |= AssignedType::force_match_or_write(
+                                is_progress |= AssignedType::match_or_write(
                                     HintedPrimitiveType::Option(Box::new(inner.to_owned())),
                                     &mut outs[0],
                                 )
                                 .is_progress();
 
-                                is_progress |= AssignedType::force_match_or_write(
+                                is_progress |= AssignedType::match_or_write(
                                     const_input.into(),
                                     &mut ins[0],
                                 )
@@ -1152,7 +1137,7 @@ impl<'pins> ResolvePinTypes<'pins> {
                             assert_eq!(outs.len(), 1);
 
                             is_progress |=
-                                AssignedType::force_match_or_write(ty, &mut outs[0]).is_progress();
+                                AssignedType::match_or_write(ty, &mut outs[0]).is_progress();
 
                             Self { pins, is_progress }
                         }
