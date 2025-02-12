@@ -779,6 +779,10 @@ pub enum NodeStub {
 
     /// Match the input values and execute appropriate branch.
     /// Match should be exhaustive (or with wildcard).
+    ///
+    /// If match accepts several inputs, these are merged into the array
+    /// (since we have no tuple types yet).
+    /// Similarly, if output value is an array, it is split into separate outputs.
     Match {
         /// Number of inputs of the node.
         inputs: PinOrder,

@@ -1010,8 +1010,58 @@ impl<'pins> ResolvePinTypes<'pins> {
 
                             Self { pins, is_progress }
                         }
-                        Match { .. } => todo!(),
-                        Func { .. } => todo!(),
+                        Match {
+                            values, wildcard, ..
+                        } => {
+                            // TODO where do we validate this node for variant correctness?
+                            // Do we do this already? :)
+
+                            trace!("Match: resolve types of input and output pins");
+
+                            let input_val = {
+                                if let Some((pat, _)) = values.first() {
+                                    Some(pat.value())
+                                } else {
+                                    None
+                                }
+                            };
+
+                            let output_val = {
+                                if let Some((_, value)) = values.first() {
+                                    Some(value)
+                                } else if let Some(wildcard) = wildcard.as_ref() {
+                                    Some(wildcard)
+                                } else {
+                                    None
+                                }
+                            };
+
+                            let (ins, outs) = Self::pin_io_slices_mut(pins, node);
+
+                            trace!("Set input pin types");
+                            if let Some(input_ty_iter) = input_val.map(Value::iter) {
+                                for (ty, val) in ins.iter_mut().zip(input_ty_iter) {
+                                    is_progress |=
+                                        AssignedType::match_or_write(val.type_of().into(), ty)
+                                            .is_progress();
+                                }
+                            }
+
+                            trace!("Set output pin types");
+                            if let Some(output_ty_iter) = output_val.map(Value::iter) {
+                                is_progress |= for (ty, val) in ins.iter_mut().zip(output_ty_iter) {
+                                    is_progress |=
+                                        AssignedType::match_or_write(val.type_of().into(), ty)
+                                            .is_progress();
+                                }
+                            }
+
+                            Self { pins, is_progress }
+                        }
+                        Func(predicate) => {
+                            trace!("Func: unresolvable within local resolver");
+                            Self { pins, is_progress }
+                        }
                         Constant(value) => {
                             let ty = value.type_of().into();
                             assert_eq!(pins.len(), 1);
@@ -1052,15 +1102,16 @@ impl<'pins> ResolvePinTypes<'pins> {
                     use NodeStub::*;
 
                     match node {
-                        Drop | Output { .. } | Crash { .. } => {
+                        Drop | Output { .. } | Crash { .. } | Unreachable { .. } => {
                             // Unresolvable without external information.
                             trace!("Is not a resolvable node, skipping: {node:?}");
                             Self { pins, is_progress }
                         }
                         ExpectSome { .. } => {
-                            let const_input = node.static_inputs().unwrap().first().unwrap().into();
+                            let const_input =
+                                *node.static_inputs().unwrap().first().unwrap().into();
                             let const_output =
-                                node.static_outputs().unwrap().first().unwrap().into();
+                                *node.static_outputs().unwrap().first().unwrap().into();
                             let (ins, outs) = Self::pin_io_slices_mut(pins, node);
                             assert_eq!(ins.len(), 1);
                             assert_eq!(outs.len(), 1);
@@ -1118,7 +1169,9 @@ impl<'pins> ResolvePinTypes<'pins> {
                             assert_eq!(ins.len(), 1);
                             assert_eq!(outs.len(), 1);
 
-                            trace!("OkOrCrash: resolve inner type of input Result or type of output");
+                            trace!(
+                                "OkOrCrash: resolve inner type of input Result or type of output"
+                            );
                             let mut ty = outs[0].clone();
                             if let Some(out) = ty.opt_ty() {
                                 let mut input = AssignedType::with(HintedPrimitiveType::Result(
