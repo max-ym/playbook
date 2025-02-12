@@ -50,6 +50,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
             edges: Vec::new(),
             predicates: Vec::new(),
             root_nodes: Vec::new(),
+            valid: valid::Validator::new(),
             rnd: {
                 use rand::SeedableRng;
                 std::time::SystemTime::now()
@@ -1435,6 +1436,32 @@ impl From<HintedPrimitiveType> for PrimitiveType {
             HPT::Array(v) => PrimitiveType::Array(Box::new((*v).into())),
             HPT::Result(b) => PrimitiveType::Result(Box::new((b.0.into(), b.1.into()))),
             HPT::Option(v) => PrimitiveType::Option(Box::new((*v).into())),
+            HPT::Hint => {
+                panic!("correct type resolver should not pass naked Hint into resolved type")
+            }
+        }
+    }
+}
+
+impl From<&HintedPrimitiveType> for PrimitiveType {
+    fn from(hpt: &HintedPrimitiveType) -> Self {
+        use HintedPrimitiveType as HPT;
+        match hpt {
+            HPT::Int => PrimitiveType::Int,
+            HPT::Uint => PrimitiveType::Uint,
+            HPT::Unit => PrimitiveType::Unit,
+            HPT::Moneraty => PrimitiveType::Moneraty,
+            HPT::Date => PrimitiveType::Date,
+            HPT::DateTime => PrimitiveType::DateTime,
+            HPT::Time => PrimitiveType::Time,
+            HPT::Bool => PrimitiveType::Bool,
+            HPT::Str => PrimitiveType::Str,
+            HPT::Ordering => PrimitiveType::Ordering,
+            HPT::File => PrimitiveType::File,
+            HPT::Record => PrimitiveType::Record,
+            HPT::Array(v) => PrimitiveType::Array(Box::new((**v).to_owned().into())),
+            HPT::Result(b) => PrimitiveType::Result(Box::new((b.0.to_owned().into(), b.1.to_owned().into()))),
+            HPT::Option(v) => PrimitiveType::Option(Box::new((**v).to_owned().into())),
             HPT::Hint => {
                 panic!("correct type resolver should not pass naked Hint into resolved type")
             }

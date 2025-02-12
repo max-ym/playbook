@@ -313,9 +313,10 @@ impl DerefMut for PinGroup {
 impl<T> Canvas<T> {
     /// Get pin type for given pin. Returns [Ok] of [None] if the pin has no resolved type.
     /// Returns [Ok] with [Some] resolved type. Returns [Err] if the node/pin does not exist.
-    pub fn calc_pin_type(&mut self, pin: Pin) -> Result<Option<&PrimitiveType>, PinQueryError> {
+    pub fn calc_pin_type(&mut self, pin: Pin) -> Result<Option<PrimitiveType>, PinQueryError> {
         let ty = Validator::resolve_pin_type(self, pin)?;
-        Ok(ty.ty[pin.order as usize].ty.as_ref())
+        let idx = ty.ty[pin.order as usize];
+        Ok(self.valid.pin_groups[idx].ty.as_ref().ok().map(Into::into))
     }
 }
 
@@ -367,7 +368,7 @@ impl Validator {
             .ok_or(PinQueryError::NodeNotFound(pin.node_id))?;
         let pin_group_idx = node.ty[pin.order as usize];
         let pin_group = &canvas.valid.pin_groups[pin_group_idx];
-        Ok(pin_group.ty.as_ref().map(|v| v.as_ref()).unwrap_or(None))
+        Ok(pin_group.opt_ty())
     }
 
     fn set_pin_type<T>(canvas: &mut Canvas<T>, pin: Pin, ty: AssignedType) {
@@ -454,16 +455,6 @@ impl Validator {
                     // if we reach this point, it means that particular code
                     // likely has a bug.
                 }
-                Err(UnionConflict) => {
-                    info!("union conflict for node {node_idx}");
-                    // We would not be able to resolve this node further, so we stop here.
-                    break;
-                }
-                Err(RemainingUnknownPins) => {
-                    trace!("remaining unknown pins for node {node_idx}");
-                    // No progress was made, so we end with this node.
-                    break;
-                }
             };
         }
 
@@ -527,7 +518,7 @@ impl Validator {
             let other = edge.oppose(node_id);
             let ty = Validator::peek_pin_type(canvas, other)
                 .expect("correct edge maintenance guarantee existance of required nodes");
-            buf[other.order as usize].ty = ty.cloned();
+            buf[other.order as usize].ty = Ok(ty.cloned().unwrap_or(HintedPrimitiveType::Hint));
         }
         canvas.valid.buf = buf;
 
@@ -971,13 +962,13 @@ impl<'pins> ResolvePinTypes<'pins> {
                             trace!("ExpectOne: get a known type in any of the input pins");
                             let mut detect = AssignedType::new();
                             for i in ins.iter_mut() {
-                                is_progress |= AssignedType::union(&mut detect, i);
+                                is_progress |= AssignedType::union(&mut detect, i).is_progress();
                             }
                             trace!("Detected type for propagation: {detect:#?}");
 
                             trace!("Propagete detected type to all input pins");
                             for i in ins.iter_mut() {
-                                is_progress |= AssignedType::union(&mut detect, i)
+                                is_progress |= AssignedType::union(&mut detect, i).is_progress();
                             }
 
                             // Output should be Result<type, Array<type>>.
@@ -985,7 +976,8 @@ impl<'pins> ResolvePinTypes<'pins> {
                             let inner = detect.to_ty_or_hint();
                             let array = HintedPrimitiveType::Array(Box::new(inner.clone()));
                             let result = HintedPrimitiveType::Result(Box::new((inner, array)));
-                            is_progress |= AssignedType::match_or_write(result, &mut outs[0])?;
+                            is_progress |=
+                                AssignedType::match_or_write(result, &mut outs[0]).is_progress();
 
                             Self { pins, is_progress }
                         }
@@ -1049,7 +1041,7 @@ impl<'pins> ResolvePinTypes<'pins> {
 
                             trace!("Set output pin types");
                             if let Some(output_ty_iter) = output_val.map(Value::iter) {
-                                is_progress |= for (ty, val) in ins.iter_mut().zip(output_ty_iter) {
+                                for (ty, val) in ins.iter_mut().zip(output_ty_iter) {
                                     is_progress |=
                                         AssignedType::match_or_write(val.type_of().into(), ty)
                                             .is_progress();
@@ -1108,10 +1100,8 @@ impl<'pins> ResolvePinTypes<'pins> {
                             Self { pins, is_progress }
                         }
                         ExpectSome { .. } => {
-                            let const_input =
-                                *node.static_inputs().unwrap().first().unwrap().into();
-                            let const_output =
-                                *node.static_outputs().unwrap().first().unwrap().into();
+                            let const_input = *node.static_inputs().unwrap().first().unwrap();
+                            let const_output = *node.static_outputs().unwrap().first().unwrap();
                             let (ins, outs) = Self::pin_io_slices_mut(pins, node);
                             assert_eq!(ins.len(), 1);
                             assert_eq!(outs.len(), 1);
@@ -1146,9 +1136,11 @@ impl<'pins> ResolvePinTypes<'pins> {
                                 )
                                 .is_progress();
 
-                                is_progress |=
-                                    AssignedType::force_match_or_write(const_input, &mut ins[0])
-                                        .is_progress();
+                                is_progress |= AssignedType::force_match_or_write(
+                                    const_input.into(),
+                                    &mut ins[0],
+                                )
+                                .is_progress();
                             }
 
                             Self { pins, is_progress }
@@ -1216,22 +1208,20 @@ impl<'pins> ResolvePinTypes<'pins> {
             ($kind:ident) => {
                 if let Some($kind) = node.$kind() {
                     for (i, t) in $kind.iter().copied().enumerate() {
-                        if let Some(t) = t.map(Into::into) {
-                            use TypePrecision::*;
-                            match pins[i].union_type_with(t) {
-                                Same | Uncertain => {}
-                                Precise => is_progress = true,
-                                Incompatible => {
-                                    info!("incompatible types for pin {i}");
-                                    // Moving forward, union_type_with marked this
-                                    // pin as erroneous, which may affect
-                                    // some resolution quality, but still we're
-                                    // doing best-effort.
+                        use TypePrecision::*;
+                        match pins[i].union_type_with(t.into()) {
+                            Same | Uncertain => {}
+                            Precise => is_progress = true,
+                            Incompatible => {
+                                info!("incompatible types for pin {i}");
+                                // Moving forward, union_type_with marked this
+                                // pin as erroneous, which may affect
+                                // some resolution quality, but still we're
+                                // doing best-effort.
 
-                                    // We still mark this as progress, as we did
-                                    // change the state of the pin.
-                                    is_progress = true;
-                                }
+                                // We still mark this as progress, as we did
+                                // change the state of the pin.
+                                is_progress = true;
                             }
                         }
                     }
