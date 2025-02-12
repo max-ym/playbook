@@ -254,8 +254,11 @@ pub(crate) struct Validator {
     /// memory over and over again for each subsequent run, for each node.
     buf: Vec<AssignedType>,
 
+    /// Buffer for tracking nodes in queue for resolution.
+    resolv_stack: ResolutionStack,
+
     /// Set of nodes with modifications that require revalidation.
-    nodes_mod: HashSet<Id>,
+    nodes_modified: HashSet<Id>,
 
     /// Nodes known to validator.
     /// Sorted by ID.
@@ -278,7 +281,7 @@ type PinGroupIdx = usize;
 
 /// Pins that are grouped together because the edges between them make them the same type,
 /// hence they have the same type assigned.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct PinGroup(AssignedType);
 
 impl Deref for PinGroup {
@@ -308,33 +311,23 @@ impl<T> Canvas<T> {
 impl Validator {
     pub fn new() -> Self {
         Self {
-            buf: Vec::new(),
-            nodes_mod: HashSet::new(),
-            nodes: Vec::new(),
-            pin_groups: Vec::new(),
-        }
-    }
-
-    pub fn alloc(&mut self, capacity: usize) {
-        if self.buf.capacity() == 0 {
-            self.buf.reserve(64);
-        }
-        if self.nodes_mod.capacity() == 0 {
-            self.nodes_mod.reserve(capacity);
-        }
-        if self.nodes.capacity() == 0 {
-            self.nodes.reserve(capacity);
-        }
-        if self.pin_groups.capacity() == 0 {
-            self.pin_groups.reserve(capacity);
+            buf: Vec::with_capacity(128),
+            resolv_stack: ResolutionStack::preallocated(),
+            nodes_modified: HashSet::with_capacity(256),
+            nodes: Vec::with_capacity(256),
+            pin_groups: Vec::with_capacity(256),
         }
     }
 
     fn node(&self, id: Id) -> Option<&NodeData> {
+        self.node_idx(id).map(|idx| &self.nodes[idx as usize])
+    }
+
+    fn node_idx(&self, id: Id) -> Option<NodeIdx> {
         self.nodes
             .binary_search_by(|n| n.id.cmp(&id))
             .ok()
-            .map(|idx| &self.nodes[idx])
+            .map(|v| v as NodeIdx)
     }
 
     /// Peek into the pin type. If it is not known, return [None].
@@ -342,7 +335,7 @@ impl Validator {
         canvas: &Canvas<T>,
         pin: Pin,
     ) -> Result<Option<&HintedPrimitiveType>, PinQueryError> {
-        let is_actual = !canvas.valid.nodes_mod.contains(&pin.node_id);
+        let is_actual = !canvas.valid.nodes_modified.contains(&pin.node_id);
         if !is_actual {
             return Ok(None);
         }
@@ -366,32 +359,52 @@ impl Validator {
         *pin_group = PinGroup(ty);
     }
 
+    fn clear_node_pins(&mut self, node_idx: usize) {
+        // Take out the pin groups array for modification.
+        let mut pin_groups = std::mem::take(&mut self.pin_groups);
+
+        for &pin_group_idx in self.nodes[node_idx].ty.iter() {
+            pin_groups[pin_group_idx] = PinGroup::default();
+        }
+
+        // Return the modified pin groups.
+        self.pin_groups = pin_groups;
+    }
+
     pub fn resolve_pin_type<T>(
         canvas: &mut Canvas<T>,
         pin: Pin,
     ) -> Result<&NodeData, PinQueryError> {
-        if !canvas.valid.nodes_mod.contains(&pin.node_id) {
-            if let Some(node) = canvas.valid.node(pin.node_id) {
-                trace!("returning already resolved node");
-                return Ok(node);
+        if !canvas.valid.nodes_modified.contains(&pin.node_id) {
+            if let Some(node) = canvas.valid.node_idx(pin.node_id) {
+                trace!("returning already resolved node, no changes registered");
+                return Ok(&canvas.valid.nodes[node as usize]);
             }
         }
 
         // Next node to resolve.
-        let mut resolve_next = VecDeque::with_capacity(64);
-        resolve_next.push_front(
+        canvas.valid.resolv_stack.push(
             canvas
                 .node_id_to_idx(pin.node_id)
                 .ok_or(PinQueryError::NodeNotFound(pin.node_id))?,
         );
 
-        while !resolve_next.is_empty() {
-            // let node = &canvas.nodes[node_idx];
-            // if node.is_resolved() {
-            //     continue;
-            // }
+        while let Some(node_idx) = canvas.valid.resolv_stack.peek() {
+            let node_idx = node_idx as usize;
+            if canvas
+                .valid
+                .nodes_modified
+                .contains(&canvas.nodes[node_idx].id)
+            {
+                trace!("node at {node_idx} was modified, clearing old resolution");
+                canvas.valid.clear_node_pins(node_idx);
+                canvas
+                    .valid
+                    .nodes_modified
+                    .remove(&canvas.nodes[node_idx].id);
+            }
 
-            Self::resolve_node(canvas, &mut resolve_next);
+            Self::resolve_node(canvas);
         }
 
         Ok(canvas
@@ -400,16 +413,19 @@ impl Validator {
             .expect("should exist due to ran validation"))
     }
 
-    /// Resolve types for the pins of a node comming first in the queue. Old resolution, if
-    /// present, will be discarded. The function can again place this node into `resolve_next`
-    /// queue if the resolution was not complete, but is believed to proceed once other nodes
+    /// Resolve types for the pins of a node comming first in the queue.
+    /// The function can again enqueue the node if it is not fully resolved,
+    /// but is believed to proceed once other nodes
     /// in the queue are processed.
-    fn resolve_node<T>(canvas: &mut Canvas<T>, resolve_next: &mut VecDeque<NodeIdx>) {
+    fn resolve_node<T>(canvas: &mut Canvas<T>) {
         use std::convert::Infallible as Never;
 
-        let node_idx = resolve_next.pop_back().unwrap() as usize;
+        let node_idx =
+            canvas.valid.resolv_stack.next().expect(
+                "this function should only be called when there are enqueued nodes to resolve",
+            ) as usize;
         let node_id = canvas.nodes[node_idx].id;
-        let buf_token = Validator::load_buf_for(canvas, node_id);
+        let buf_release_tok = Validator::load_buf_for(canvas, node_id);
 
         trace!("entering type resolution loop for node {node_id}");
         loop {
@@ -429,9 +445,13 @@ impl Validator {
                         trace!("progress was made for node {node_idx}");
                         continue;
                     } else {
-                        unreachable!(
-                            "node should be resolved or progress should be made to be `Ok`"
-                        );
+                        trace!("no progress was made for node {node_idx}");
+
+                        // Put this node into wait queue, run its neighbors.
+                        // It may give more information for this node to resolve.
+                        canvas.valid.resolv_stack.push_await(node_idx as NodeIdx);
+                        Validator::neighbors_scan_for_revalidation(node_idx, canvas);
+                        return;
                     }
                 }
                 Err(PinNumberMismatch) => {
@@ -443,36 +463,32 @@ impl Validator {
             };
         }
 
-        Validator::save_buf_for(canvas, buf_token);
-        Validator::neighbors_scan_for_revalidation(node_idx, canvas, resolve_next);
-        todo!()
+        Validator::save_buf_for(canvas, buf_release_tok);
+        Validator::neighbors_scan_for_revalidation(node_idx, canvas);
     }
 
     /// Check whether neighbors of the node connected by the edges require revalidation, and if
     /// so, add them to the `resolve_next` queue.
     ///
     /// True is returned if at least one neighbor requires revalidation and was added to the queue.
-    fn neighbors_scan_for_revalidation<T>(
-        node_idx: usize,
-        canvas: &mut Canvas<T>,
-        resolve_next: &mut VecDeque<NodeIdx>,
-    ) -> bool {
+    fn neighbors_scan_for_revalidation<T>(node_idx: usize, canvas: &mut Canvas<T>) -> bool {
         let node_id = canvas.nodes[node_idx].id;
         let mut require_others = false;
+        let mut resolve_stack = std::mem::take(&mut canvas.valid.resolv_stack);
         for edge in canvas
             .node_edge_io_iter(node_id)
             .expect("existence proved by caller")
         {
             let other_node_id = edge.oppose(node_id).node_id;
-            if canvas.valid.nodes_mod.contains(&other_node_id) {
+            if canvas.valid.nodes_modified.contains(&other_node_id) {
                 require_others = true;
-                resolve_next.push_front(
-                    canvas
-                        .node_id_to_idx(other_node_id)
-                        .expect("correct edge maintenance on add/remove operations"),
-                );
+                let idx = canvas
+                    .node_id_to_idx(other_node_id)
+                    .expect("correct edge maintenance on add/remove operations");
+                resolve_stack.push(idx);
             }
         }
+        canvas.valid.resolv_stack = resolve_stack;
         require_others
     }
 
@@ -532,6 +548,69 @@ impl Validator {
         // Return what we took.
         canvas.valid.buf = buf;
         canvas.valid.pin_groups = pin_groups;
+    }
+}
+
+/// Stack to hold information about resolution nodes that are planned to be resolved next.
+/// This is used during resolution to track order for current node resolution request.
+#[derive(Debug)]
+struct ResolutionStack {
+    /// Next planned node to resolve.
+    next: Vec<NodeIdx>,
+
+    /// If [Self::next] is empty, this stack is used to resolve nodes.
+    /// Nodes are put here when they themselves were triggering the resolution
+    /// of other nodes by putting them into [Self::next]. This way, their resolution was
+    /// postponed until all other nodes were resolved, to gather more information required
+    /// for complete resolution.
+    awaiting: Vec<NodeIdx>,
+}
+
+impl Iterator for ResolutionStack {
+    type Item = NodeIdx;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.pop().or_else(|| self.awaiting.pop())
+    }
+}
+
+impl ExactSizeIterator for ResolutionStack {
+    fn len(&self) -> usize {
+        self.next.len() + self.awaiting.len()
+    }
+}
+
+impl Default for ResolutionStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResolutionStack {
+    pub fn new() -> Self {
+        Self {
+            next: Vec::new(),
+            awaiting: Vec::new(),
+        }
+    }
+
+    pub fn preallocated() -> Self {
+        Self {
+            next: Vec::with_capacity(256),
+            awaiting: Vec::with_capacity(32),
+        }
+    }
+
+    pub fn push(&mut self, node: NodeIdx) {
+        self.next.push(node);
+    }
+
+    pub fn push_await(&mut self, node: NodeIdx) {
+        self.awaiting.push(node);
+    }
+
+    pub fn peek(&self) -> Option<NodeIdx> {
+        self.next.last().or_else(|| self.awaiting.last()).copied()
     }
 }
 
@@ -1121,11 +1200,9 @@ impl<'pins> ResolvePinTypes<'pins> {
                                 )
                                 .is_progress();
 
-                                is_progress |= AssignedType::match_or_write(
-                                    const_input.into(),
-                                    &mut ins[0],
-                                )
-                                .is_progress();
+                                is_progress |=
+                                    AssignedType::match_or_write(const_input.into(), &mut ins[0])
+                                        .is_progress();
                             }
 
                             Self { pins, is_progress }
