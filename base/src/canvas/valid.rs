@@ -373,11 +373,11 @@ impl Validator {
         canvas: &mut Canvas<T>,
         pin: Pin,
     ) -> Result<&NodeData, PinQueryError> {
-        if !canvas.valid.nodes_modified.contains(&pin.node_id) {
-            if let Some(node) = canvas.valid.node_idx(pin.node_id) {
-                trace!("returning already resolved node, no changes registered");
-                return Ok(&canvas.valid.nodes[node as usize]);
-            }
+        for modified in canvas.valid.nodes_modified.drain() {
+            let idx = canvas
+                .node_id_to_idx(modified)
+                .expect("correct maintenance of the nodes_modified set");
+            canvas.valid.resolv_stack.unstuck(idx);
         }
 
         // Next node to resolve.
@@ -441,13 +441,17 @@ impl Validator {
                         break;
                     } else if is_progress {
                         trace!("progress was made for node {node_idx}");
+                        canvas.valid.resolv_stack.unstuck(node_idx as NodeIdx);
                         continue;
                     } else {
                         trace!("no progress was made for node {node_idx}");
 
                         // Put this node into wait queue, run its neighbors.
                         // It may give more information for this node to resolve.
-                        canvas.valid.resolv_stack.push_await(node_idx as NodeIdx);
+                        canvas
+                            .valid
+                            .resolv_stack
+                            .push_await_maybe_stuck(node_idx as NodeIdx);
                         Validator::neighbors_scan_for_revalidation(node_idx, canvas);
                         return;
                     }
@@ -562,6 +566,9 @@ struct ResolutionStack {
     /// postponed until all other nodes were resolved, to gather more information required
     /// for complete resolution.
     awaiting: Vec<NodeIdx>,
+
+    /// Nodes that are stuck in the resolution loop, so we won't run them again.
+    maybe_stuck: HashSet<NodeIdx>,
 }
 
 impl Iterator for ResolutionStack {
@@ -589,24 +596,49 @@ impl ResolutionStack {
         Self {
             next: Vec::new(),
             awaiting: Vec::new(),
+            maybe_stuck: HashSet::new(),
         }
     }
 
+    /// Create a preallocated stack with hardcoded capacity.
     pub fn preallocated() -> Self {
         Self {
             next: Vec::with_capacity(256),
             awaiting: Vec::with_capacity(32),
+            maybe_stuck: HashSet::with_capacity(256),
         }
     }
 
+    /// Push node to the stack to be resolved next, unless it is marked as stuck.
     pub fn push(&mut self, node: NodeIdx) {
+        if self.maybe_stuck.contains(&node) {
+            return;
+        }
         self.next.push(node);
     }
 
+    /// Push node to the stack to be resolved next, unless it is marked as stuck.
     pub fn push_await(&mut self, node: NodeIdx) {
+        if self.maybe_stuck.contains(&node) {
+            return;
+        }
         self.awaiting.push(node);
     }
 
+    /// Push node to the stack to be resolved next, unless it was already marked as stuck.
+    /// This will mark the node as stuck, so it won't be resolved
+    /// again unless [unstuck](Self::unstuck).
+    pub fn push_await_maybe_stuck(&mut self, node: NodeIdx) {
+        self.push_await(node);
+        self.maybe_stuck.insert(node);
+    }
+
+    /// Mark node as not stuck, so it can be resolved again.
+    pub fn unstuck(&mut self, node: NodeIdx) {
+        self.maybe_stuck.remove(&node);
+    }
+
+    /// Peek into the next node to resolve.
     pub fn peek(&self) -> Option<NodeIdx> {
         self.next.last().or_else(|| self.awaiting.last()).copied()
     }
