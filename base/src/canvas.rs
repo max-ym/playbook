@@ -1349,7 +1349,7 @@ pub enum PrimitiveType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum HintedPrimitiveType {
+pub(crate) enum HintedPrimitiveType {
     Int,
     Uint,
     Unit,

@@ -1,13 +1,11 @@
-use std::{borrow::Borrow, collections::VecDeque};
-
 use super::*;
 
 use hashbrown::HashSet;
-use log::{debug, error, info, trace};
+use log::{error, info, trace};
 use smallvec::SmallVec;
 
 #[derive(Debug, Clone)]
-struct AssignedType {
+pub(crate) struct AssignedType {
     /// Assigned type of the edge. Can be [Ok] but [None] if not known.
     /// If the type is [Err], it means that the type is erroneous and cannot be resolved.
     ty: Result<HintedPrimitiveType, ()>,
@@ -619,6 +617,7 @@ impl ResolutionStack {
 struct BufferReleaseToken(Id);
 
 impl BufferReleaseToken {
+    #[allow(dead_code)]
     pub fn discard(self) {}
 }
 
@@ -1107,7 +1106,7 @@ impl<'pins> ResolvePinTypes<'pins> {
 
                             trace!("Set output pin types");
                             if let Some(output_ty_iter) = output_val.map(Value::iter) {
-                                for (ty, val) in ins.iter_mut().zip(output_ty_iter) {
+                                for (ty, val) in outs.iter_mut().zip(output_ty_iter) {
                                     is_progress |=
                                         AssignedType::match_or_write(val.type_of().into(), ty)
                                             .is_progress();
