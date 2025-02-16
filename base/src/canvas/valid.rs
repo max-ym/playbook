@@ -262,12 +262,7 @@ pub(crate) struct Validator {
     /// Sorted by ID.
     nodes: Vec<NodeData>,
 
-    /// Pin groups - pins that are known to share the type (because they are connected).
-    pin_groups: Vec<PinGroup>,
-
-    /// Position in [Self::pin_groups] that are vacant (can be reused) - no
-    /// pins are assigned to them anymore.
-    pin_groups_vacant: Vec<usize>,
+    pin_groups: PinGroups,
 }
 
 /// Node-specific data in the validator.
@@ -324,6 +319,93 @@ impl DerefMut for PinGroup {
     }
 }
 
+#[derive(Debug, Default)]
+struct PinGroups {
+    /// Pin groups - pins that are known to share the type (because they are connected).
+    vec: Vec<PinGroup>,
+
+    /// Position in [Self::pin_groups] that are vacant (can be reused) - no
+    /// pins are assigned to them anymore.
+    vacant: Vec<usize>,
+}
+
+impl PinGroups {
+    pub fn preallocated() -> Self {
+        Self {
+            vec: Vec::with_capacity(256),
+            vacant: Vec::with_capacity(64),
+        }
+    }
+
+    /// Allocate in array [Self::vec] for the node. This clears any previous
+    /// type information for the pins at this position.
+    pub fn allocate(&mut self) -> usize {
+        if let Some(idx) = self.vacant.pop() {
+            trace!("reusing vacant pin group at {idx} for new pin group");
+            self.vec[idx] = PinGroup::default();
+            idx
+        } else {
+            let idx = self.vec.len();
+            self.vec.push(PinGroup::default());
+            trace!("allocated new pin group at {idx}");
+            idx
+        }
+    }
+
+    /// Merge pin groups on both sides of an edge into one.
+    pub fn merge(valid: &mut Validator, edge: Edge) {
+        let (to_grp, from_grp) = Self::edge_into_to_from(valid, edge);
+
+        trace!("merging pin groups {from_grp} and {to_grp} into one");
+        valid.node_mut(edge.from.node_id).unwrap().ty[edge.from.order as usize] = to_grp;
+
+        trace!(
+            "decrementing strong counter of pin group {from_grp} that was released during merge"
+        );
+        valid.pin_groups.decrement(from_grp);
+
+        Self::mark_nodes_modified(valid, edge);
+    }
+
+    fn edge_into_to_from(valid: &Validator, edge: Edge) -> (PinGroupIdx, PinGroupIdx) {
+        let to = valid.node(edge.to.node_id).unwrap();
+        let from = valid.node(edge.from.node_id).unwrap();
+        let to_grp = to.ty[edge.to.order as usize];
+        let from_grp = from.ty[edge.from.order as usize];
+        (to_grp, from_grp)
+    }
+
+    fn mark_nodes_modified(valid: &mut Validator, edge: Edge) {
+        trace!(
+            "mark nodes {} and {} as modified",
+            edge.from.node_id,
+            edge.to.node_id
+        );
+        valid.nodes_modified.insert(edge.from.node_id);
+        valid.nodes_modified.insert(edge.to.node_id);
+    }
+
+    pub fn unmerge(valid: &mut Validator, edge: Edge) {
+        let (to_grp, from_grp) = Self::edge_into_to_from(valid, edge);
+        assert_eq!(to_grp, from_grp);
+        let grp = to_grp;
+
+        trace!("unmerging pin group {grp} into two separate groups");
+        valid.node_mut(edge.from.node_id).unwrap().ty[edge.from.order as usize] =
+            valid.pin_groups.allocate();
+
+        Self::mark_nodes_modified(valid, edge);
+    }
+
+    /// Decrement strong counter of this pin group. If the strong counter runs out, group
+    /// gets released (made vacant).
+    pub fn decrement(&mut self, pin_grp: usize) {
+        if self.vec[pin_grp].strong_dec() {
+            self.vacant.push(pin_grp);
+        }
+    }
+}
+
 impl<T> Canvas<T> {
     /// Get pin type for given pin. Returns [Ok] of [None] if the pin has no resolved type.
     /// Returns [Ok] with [Some] resolved type. Returns [Err] if the node/pin does not exist.
@@ -355,8 +437,7 @@ impl Validator {
             resolv_stack: ResolutionStack::preallocated(),
             nodes_modified: HashSet::with_capacity(256),
             nodes: Vec::with_capacity(256),
-            pin_groups: Vec::with_capacity(256),
-            pin_groups_vacant: Vec::with_capacity(64),
+            pin_groups: PinGroups::preallocated(),
         }
     }
 
@@ -365,7 +446,7 @@ impl Validator {
         trace!("adding node {node_id} with {pin_cnt} pins to the validator");
         let mut ty = SmallVec::with_capacity(pin_cnt);
         for _ in 0..pin_cnt {
-            ty.push(self.allocate_pin_group());
+            ty.push(self.pin_groups.allocate());
         }
 
         trace!("allocated {} pin groups for node {node_id}", ty.len());
@@ -373,31 +454,13 @@ impl Validator {
         self.nodes_modified.insert(node_id);
     }
 
-    /// Allocate in array [Self::pin_groups] for the node. This clears any previous
-    /// type information for the pins at this position.
-    fn allocate_pin_group(&mut self) -> usize {
-        if let Some(idx) = self.pin_groups_vacant.pop() {
-            trace!("reusing vacant pin group at {idx} for new pin group");
-            self.pin_groups[idx] = PinGroup::default();
-            idx
-        } else {
-            let idx = self.pin_groups.len();
-            self.pin_groups.push(PinGroup::default());
-            trace!("allocated new pin group at {idx}");
-            idx
-        }
-    }
-
     /// Remove node from the validator.
     pub(crate) fn remove_node(&mut self, node_id: Id) {
         let idx = self.node_idx(node_id).expect("existence proved by caller") as usize;
         self.nodes_modified.remove(&node_id);
         let removed = self.nodes.remove(idx);
-        for &pin_group_idx in removed.ty.iter() {
-            let is_empty = self.pin_groups[pin_group_idx].strong_dec();
-            if is_empty {
-                self.pin_groups_vacant.push(pin_group_idx);
-            }
+        for &pin_grp in removed.ty.iter() {
+            self.pin_groups.decrement(pin_grp);
         }
     }
 
@@ -412,32 +475,26 @@ impl Validator {
             .node_idx(edge.to.node_id)
             .expect("should be guaranteed by the caller") as usize;
 
-        self.merge_pin_group(edge);
+        PinGroups::merge(self, edge);
         self.nodes_modified.insert(edge.from.node_id);
         self.nodes_modified.insert(edge.to.node_id);
         self.clear_node_pins(from_node_idx);
         self.clear_node_pins(to_node_idx);
     }
 
-    /// Merge pin groups on both sides of an edge into one.
-    fn merge_pin_group(&mut self, edge: Edge) {
-        todo!();
-    }
-
-    /// Decrement strong counter of this pin group. If the strong counter runs out, group
-    /// gets released (made vacant).
-    fn dec_pin_group(&mut self, pin_grp: usize) {
-        if self.pin_groups[pin_grp].strong_dec() {
-            self.pin_groups_vacant.push(pin_grp);
-        }
-    }
-
     pub(crate) fn remove_edge(&mut self, edge: Edge) {
-        todo!()
+        PinGroups::unmerge(self, edge);
+        self.nodes_modified.insert(edge.from.node_id);
+        self.nodes_modified.insert(edge.to.node_id);
     }
 
     fn node(&self, id: Id) -> Option<&NodeData> {
         self.node_idx(id).map(|idx| &self.nodes[idx as usize])
+    }
+
+    fn node_mut(&mut self, id: Id) -> Option<&mut NodeData> {
+        self.node_idx(id)
+            .map(move |idx| &mut self.nodes[idx as usize])
     }
 
     fn node_idx(&self, id: Id) -> Option<NodeIdx> {
@@ -465,7 +522,7 @@ impl Validator {
         trace!("peeking into pin {pin} type, validator node data: {node:#?}");
 
         let pin_group_idx = node.ty[pin.order as usize];
-        let pin_group = &canvas.valid.pin_groups[pin_group_idx];
+        let pin_group = &canvas.valid.pin_groups.vec[pin_group_idx];
         Ok(pin_group.opt_ty())
     }
 
@@ -475,7 +532,7 @@ impl Validator {
             .node(pin.node_id)
             .expect("existence proved by caller");
         let pin_group_idx = node.ty[pin.order as usize];
-        let pin_group = &mut canvas.valid.pin_groups[pin_group_idx];
+        let pin_group = &mut canvas.valid.pin_groups.vec[pin_group_idx];
         *pin_group = PinGroup::new(ty);
     }
 
@@ -484,7 +541,7 @@ impl Validator {
         let mut pin_groups = std::mem::take(&mut self.pin_groups);
 
         for &pin_group_idx in self.nodes[node_idx].ty.iter() {
-            pin_groups[pin_group_idx].0 = AssignedType::default();
+            pin_groups.vec[pin_group_idx].0 = AssignedType::default();
         }
 
         // Return the modified pin groups.
@@ -601,7 +658,7 @@ impl Validator {
         let node_id = canvas.nodes[node_idx].id;
         trace!("scanning neighbors of node {node_id} for revalidation");
 
-        let mut require_others = false;
+        let mut has_modified_neighbors = false;
         let mut resolve_stack = std::mem::take(&mut canvas.valid.resolv_stack);
         for edge in canvas
             .node_edge_io_iter(node_id)
@@ -610,7 +667,7 @@ impl Validator {
             let other_node_id = edge.oppose(node_id).node_id;
             if canvas.valid.nodes_modified.contains(&other_node_id) {
                 trace!("neighbor {other_node_id} was modified, revalidate");
-                require_others = true;
+                has_modified_neighbors = true;
                 let idx = canvas
                     .node_id_to_idx(other_node_id)
                     .expect("correct edge maintenance on add/remove operations");
@@ -621,7 +678,7 @@ impl Validator {
         }
 
         canvas.valid.resolv_stack = resolve_stack;
-        require_others
+        has_modified_neighbors
     }
 
     /// Load type resolution buffer for the node.
@@ -675,7 +732,7 @@ impl Validator {
             .expect("existence proved by caller");
 
         for (pin_grp_idx, assigned) in node.ty.iter().copied().zip(buf.drain(..)) {
-            pin_groups[pin_grp_idx] = PinGroup::new(assigned);
+            pin_groups.vec[pin_grp_idx].0 = assigned;
         }
 
         // Return what we took.

@@ -120,15 +120,17 @@ impl<NodeMeta> Canvas<NodeMeta> {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
-            let end = self.edges.binary_search(&end_edge_out);
-            if let Ok(end) = end {
-                // +1 to include the last edge.
-                start..(end + 1)
+            let end = match self.edges.binary_search(&end_edge_out) {
+                Ok(idx) => idx,
+                Err(idx) => idx,
+            };
+            let range = start..end;
+            if range.is_empty() {
+                trace!("no edges found for node {node_id} output");
             } else {
-                // If the end edge is not found, it means that there are no edges of this type,
-                // make empty range.
-                start..start
+                trace!("edges found for node {node_id} output: {range:?}");
             }
+            range
         };
 
         let range_in = {
@@ -154,15 +156,17 @@ impl<NodeMeta> Canvas<NodeMeta> {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
-            let end = self.edges.binary_search(&end_edge_in);
-            if let Ok(end) = end {
-                // +1 to include the last edge.
-                start..(end + 1)
+            let end = match self.edges.binary_search(&end_edge_in) {
+                Ok(idx) => idx,
+                Err(idx) => idx,
+            };
+            let range = start..end;
+            if range.is_empty() {
+                trace!("no edges found for node {node_id} input");
             } else {
-                // If the end edge is not found, it means that there are no edges of this type,
-                // make empty range.
-                start..start
+                trace!("edges found for node {node_id} input: {range:?}");
             }
+            range
         };
 
         Some((range_in, range_out))
@@ -1851,5 +1855,64 @@ mod test {
         assert_eq!(bc.to, inpc);
         assert_eq!(ca.from, outc);
         assert_eq!(ca.to, inpa);
+    }
+
+    #[test]
+    fn node_edge_io_iter() {
+        crate::tests::init();
+
+        let stub = NodeStub::Todo {
+            msg: CompactString::from("test"),
+            inputs: 1,
+        };
+
+        let mut canvas = Canvas::<()>::new();
+        let a = canvas.add_node(stub.clone(), ());
+        let b = canvas.add_node(stub.clone(), ());
+        let c = canvas.add_node(stub, ());
+
+        let outa = OutputPin(Pin {
+            node_id: a,
+            order: 1,
+        });
+        let inpb = InputPin(Pin {
+            node_id: b,
+            order: 0,
+        });
+        let outb = OutputPin(Pin {
+            node_id: b,
+            order: 1,
+        });
+        let inpc = InputPin(Pin {
+            node_id: c,
+            order: 0,
+        });
+        let outc = OutputPin(Pin {
+            node_id: c,
+            order: 1,
+        });
+        let inpa = InputPin(Pin {
+            node_id: a,
+            order: 0,
+        });
+
+        let ab = canvas.add_edge_by_parts(outa, inpb).unwrap();
+        let bc = canvas.add_edge_by_parts(outb, inpc).unwrap();
+        let ca = canvas.add_edge_by_parts(outc, inpa).unwrap();
+
+        let mut iter = canvas.node_edge_io_iter(a).unwrap();
+        assert_eq!(iter.next(), Some(ab));
+        assert_eq!(iter.next(), Some(ca));
+        assert_eq!(iter.next(), None);
+
+        let mut iter = canvas.node_edge_io_iter(b).unwrap();
+        assert_eq!(iter.next(), Some(ab));
+        assert_eq!(iter.next(), Some(bc));
+        assert_eq!(iter.next(), None);
+
+        let mut iter = canvas.node_edge_io_iter(c).unwrap();
+        assert_eq!(iter.next(), Some(bc));
+        assert_eq!(iter.next(), Some(ca));
+        assert_eq!(iter.next(), None);
     }
 }
