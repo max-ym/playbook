@@ -3,7 +3,6 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base::canvas;
-use base::valid::Validated;
 use canvas::{EdgeNotFoundError, NodeNotFoundError};
 use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
@@ -128,7 +127,6 @@ impl WorkSession {
         self.projects.push(WorkSessionProject {
             project,
             changes: ChangeStack::new(),
-            valid: None,
             revalidate: false,
         });
 
@@ -153,9 +151,6 @@ pub struct WorkSessionProject {
 
     /// History stack of changes made to the project.
     changes: ChangeStack,
-
-    /// Latest validation of the project's canvas.
-    valid: Option<Validated>,
 
     /// Whether the project should be revalidated.
     revalidate: bool,
@@ -348,10 +343,9 @@ impl WorkSessionProject {
     }
 
     /// Get the known data type of the pin. [None] if the pin type is not known.
-    pub fn pin_data_type(&self, pin: canvas::Pin) -> Option<&canvas::PrimitiveType> {
+    pub fn pin_data_type(&self, pin: canvas::Pin) -> Option<canvas::PrimitiveType> {
         trace!("get data type of pin {pin}");
-        let valid = self.valid.as_ref()?;
-        valid.ty(pin)
+        self.project.canvas().pin_type(pin).ok().flatten()
     }
 }
 

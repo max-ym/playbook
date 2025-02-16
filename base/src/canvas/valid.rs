@@ -300,9 +300,23 @@ impl<T> Canvas<T> {
     /// Get pin type for given pin. Returns [Ok] of [None] if the pin has no resolved type.
     /// Returns [Ok] with [Some] resolved type. Returns [Err] if the node/pin does not exist.
     pub fn calc_pin_type(&mut self, pin: Pin) -> Result<Option<PrimitiveType>, PinQueryError> {
-        let ty = Validator::resolve_pin_type(self, pin)?;
-        let idx = ty.ty[pin.order as usize];
-        Ok(self.valid.pin_groups[idx].ty.as_ref().ok().map(Into::into))
+        Validator::resolve_pin_type(self, pin)?;
+        self.pin_type(pin)
+    }
+
+    /// Get pin type for given pin. Returns [Ok] of [None] if the pin has no resolved type, or
+    /// if the type is only partially resolved. Returns [Ok] with [Some] resolved type.
+    /// Returns [Err] if the node/pin does not exist.
+    pub fn pin_type(&self, pin: Pin) -> Result<Option<PrimitiveType>, PinQueryError> {
+        if let Some(ty) = Validator::peek_pin_type(self, pin)? {
+            if ty.is_resolved() {
+                Ok(Some(ty.into()))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -329,12 +343,12 @@ impl Validator {
     }
 
     /// Peek into the pin type. If it is not known, return [None].
-    pub fn peek_pin_type<T>(
+    pub(crate) fn peek_pin_type<T>(
         canvas: &Canvas<T>,
         pin: Pin,
     ) -> Result<Option<&HintedPrimitiveType>, PinQueryError> {
-        let is_actual = !canvas.valid.nodes_modified.contains(&pin.node_id);
-        if !is_actual {
+        let is_modified = canvas.valid.nodes_modified.contains(&pin.node_id);
+        if is_modified {
             return Ok(None);
         }
 
@@ -373,12 +387,14 @@ impl Validator {
         canvas: &mut Canvas<T>,
         pin: Pin,
     ) -> Result<&NodeData, PinQueryError> {
-        for modified in canvas.valid.nodes_modified.drain() {
+        let mut nodes_modified = std::mem::take(&mut canvas.valid.nodes_modified);
+        for modified in nodes_modified.drain() {
             let idx = canvas
                 .node_id_to_idx(modified)
                 .expect("correct maintenance of the nodes_modified set");
             canvas.valid.resolv_stack.unstuck(idx);
         }
+        canvas.valid.nodes_modified = nodes_modified;
 
         // Next node to resolve.
         canvas.valid.resolv_stack.push(
