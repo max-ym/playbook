@@ -67,9 +67,12 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let id = Id::new_node_after(last, &mut self.rnd)
             .expect("node ID generation failed, maybe ID pool is used up");
 
+        trace!("add node {id} with {} pins to the canvas. {stub:?}", stub.total_pin_count());
+        let pin_cnt = stub.total_pin_count();
         self.root_nodes.push(id);
         self.nodes.push(Node { id, stub, meta });
-
+        
+        self.valid.add_node(id, pin_cnt as usize);
         id
     }
 
@@ -239,6 +242,8 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
         // Unmark the node as a root node.
         self.unroot_node(id);
+        
+        self.valid.remove_node(id);
 
         Ok((node, edges))
     }
@@ -287,7 +292,9 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
     /// See [Canvas::add_edge_by_parts].
     pub fn add_edge(&mut self, edge: Edge) -> Result<(), NodeNotFoundError> {
-        self.add_edge_by_parts(edge.from, edge.to).map(|_| ())
+        self.add_edge_by_parts(edge.from, edge.to)?;
+        self.valid.add_edge(edge);
+        Ok(())
     }
 
     /// Remove the edge from the canvas.
@@ -297,6 +304,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
             .binary_search(&edge)
             .map_err(|_| EdgeNotFoundError(edge))?;
         self.edges.remove(idx);
+        self.valid.remove_edge(edge);
         Ok(())
     }
 
@@ -977,7 +985,7 @@ impl NodeStub {
             File => &[],
             SplitBy { .. } => &[PT::Record],
             Input { .. } => &[PT::File],
-            Drop => &[],
+            Drop => &[PT::Hint],
             Output { .. } => &[PT::Hint],
             StrOp(_) => &[PT::Str],
             Compare { .. } => &[PT::Hint, PT::Hint],
