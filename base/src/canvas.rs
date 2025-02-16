@@ -1,6 +1,6 @@
 use std::{
     fmt::{Display, Formatter},
-    ops::{Deref, DerefMut, RangeInclusive},
+    ops::{Deref, DerefMut, Range},
 };
 
 use bigdecimal::BigDecimal;
@@ -93,10 +93,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         })
     }
 
-    fn node_edge_io_ranges(
-        &self,
-        node_id: Id,
-    ) -> Option<(RangeInclusive<usize>, RangeInclusive<usize>)> {
+    fn node_edge_io_ranges(&self, node_id: Id) -> Option<(Range<usize>, Range<usize>)> {
         let range_out = {
             let start_edge_out = Edge {
                 from: OutputPin(Pin { node_id, order: 0 }),
@@ -120,12 +117,15 @@ impl<NodeMeta> Canvas<NodeMeta> {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
-            let end = match self.edges.binary_search(&end_edge_out) {
-                Ok(idx) => idx,
-                Err(idx) => idx,
-            };
-
-            start..=end
+            let end = self.edges.binary_search(&end_edge_out);
+            if let Ok(end) = end {
+                // +1 to include the last edge.
+                start..(end + 1)
+            } else {
+                // If the end edge is not found, it means that there are no edges of this type,
+                // make empty range.
+                start..start
+            }
         };
 
         let range_in = {
@@ -151,12 +151,15 @@ impl<NodeMeta> Canvas<NodeMeta> {
                 Ok(idx) => idx,
                 Err(idx) => idx,
             };
-            let end = match self.edges.binary_search(&end_edge_in) {
-                Ok(idx) => idx,
-                Err(idx) => idx,
-            };
-
-            start..=end
+            let end = self.edges.binary_search(&end_edge_in);
+            if let Ok(end) = end {
+                // +1 to include the last edge.
+                start..(end + 1)
+            } else {
+                // If the end edge is not found, it means that there are no edges of this type,
+                // make empty range.
+                start..start
+            }
         };
 
         Some((range_in, range_out))
@@ -170,18 +173,14 @@ impl<NodeMeta> Canvas<NodeMeta> {
     fn node_edge_io_slices_mut(&mut self, node_id: Id) -> Option<(&mut [Edge], &mut [Edge])> {
         let (inp, out) = self.node_edge_io_ranges(node_id)?;
         let (i, o) = {
-            let reversed = if inp.start() < out.start() {
-                false
-            } else {
-                true
-            };
+            let reversed = if inp.start < out.start { false } else { true };
             macro_rules! calc {
                 ($low:expr, $high:expr) => {{
-                    let (a, rest) = self.edges.split_at_mut(*$low.start());
-                    let (_, b) = rest.split_at_mut($high.end() + 1 - $low.start());
+                    let (a, rest) = self.edges.split_at_mut($low.start);
+                    let (_, b) = rest.split_at_mut($high.end + 1 - $low.start);
 
-                    let a_len = $high.end() - $high.start() + 1;
-                    let b_len = $low.end() - $low.start() + 1;
+                    let a_len = $high.end - $high.start + 1;
+                    let b_len = $low.end - $low.start + 1;
                     (&mut a[0..a_len], &mut b[0..b_len])
                 }};
             }
@@ -219,12 +218,12 @@ impl<NodeMeta> Canvas<NodeMeta> {
     ) -> Result<(Node<NodeMeta>, Vec<Edge>), NodeNotFoundError> {
         // Remove all edges that are connected to the node.
         let (inp, out) = self.node_edge_io_ranges(id).ok_or(NodeNotFoundError(id))?;
-        let (high, low) = if inp.start() > out.start() {
+        let (high, low) = if inp.start > out.start {
             (inp, out)
         } else {
             (out, inp)
         };
-        let mut edges = Vec::with_capacity(high.end() - high.start() + low.end() - low.start());
+        let mut edges = Vec::with_capacity(high.end - high.start + low.end - low.start);
         // Remove in such order so to retain correct ranges. Higher range should be removed first,
         // otherwise the lower range removal would shift the higher range.
         edges.extend(self.edges.drain(high));
@@ -1460,7 +1459,9 @@ impl From<&HintedPrimitiveType> for PrimitiveType {
             HPT::File => PrimitiveType::File,
             HPT::Record => PrimitiveType::Record,
             HPT::Array(v) => PrimitiveType::Array(Box::new((**v).to_owned().into())),
-            HPT::Result(b) => PrimitiveType::Result(Box::new((b.0.to_owned().into(), b.1.to_owned().into()))),
+            HPT::Result(b) => {
+                PrimitiveType::Result(Box::new((b.0.to_owned().into(), b.1.to_owned().into())))
+            }
             HPT::Option(v) => PrimitiveType::Option(Box::new((**v).to_owned().into())),
             HPT::Hint => {
                 panic!("correct type resolver should not pass naked Hint into resolved type")
@@ -1496,7 +1497,7 @@ impl HintedPrimitiveType {
     }
 
     /// This type precision compared to another.
-    pub fn precision(&self, other: &Self) -> TypePrecision {
+    pub(crate) fn precision(&self, other: &Self) -> TypePrecision {
         use HintedPrimitiveType as HPT;
         use TypePrecision::*;
 
@@ -1609,7 +1610,7 @@ impl HintedPrimitiveType {
 /// Precision to compare two types, whether they are compatible, one can clarify the other,
 /// or they are incompatible at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TypePrecision {
+pub(crate) enum TypePrecision {
     /// The types are incompatible.
     Incompatible,
 

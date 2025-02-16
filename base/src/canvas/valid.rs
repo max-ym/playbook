@@ -1367,3 +1367,40 @@ pub enum PinResolutionError {
     /// pin count.
     PinNumberMismatch,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    macro_rules! edge {
+        ($from_node:expr, $from_pin:expr => $to_node:expr, $to_pin:expr) => {
+            Edge {
+                from: OutputPin(Pin::new($from_node, $from_pin)),
+                to: InputPin(Pin::new($to_node, $to_pin)),
+            }
+        };
+    }
+
+    #[test]
+    fn resolve0() {
+        crate::tests::init();
+
+        let mut canvas = Canvas::new();
+        let file = canvas.add_node(NodeStub::File, ());
+        let in0 = canvas.add_node(NodeStub::Input { valid_names: smallvec!["a".into()] }, ());
+        let in1 = canvas.add_node(NodeStub::Input{ valid_names: smallvec!["b".into()] }, ());
+        let strop = canvas.add_node(NodeStub::StrOp(StrOp::Lowercase), ());
+        let drop0 = canvas.add_node(NodeStub::Drop, ());
+        let drop1 = canvas.add_node(NodeStub::Drop, ());
+
+        canvas.add_edge(edge!(file, 0 => in0, 0)).unwrap();
+        canvas.add_edge(edge!(file, 0 => in1, 0)).unwrap();
+        canvas.add_edge(edge!(in0, 1 => strop, 0)).unwrap();
+        canvas.add_edge(edge!(in1, 1 => drop0, 0)).unwrap();
+        canvas.add_edge(edge!(strop, 1 => drop1, 0)).unwrap();
+
+        let ty = canvas.calc_pin_type(Pin::new(drop0, 0)).unwrap().unwrap();
+        assert_eq!(ty, PrimitiveType::Str);
+    }
+}
