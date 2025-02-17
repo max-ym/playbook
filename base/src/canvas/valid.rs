@@ -660,10 +660,7 @@ impl Validator {
 
         let mut has_modified_neighbors = false;
         let mut resolve_stack = std::mem::take(&mut canvas.valid.resolv_stack);
-        for edge in canvas
-            .node_edge_io_iter(node_id)
-            .expect("existence proved by caller")
-        {
+        for edge in canvas.node_edge_io_iter(node_id) {
             let other_node_id = edge.oppose(node_id).node_id;
             if canvas.valid.nodes_modified.contains(&other_node_id) {
                 trace!("neighbor {other_node_id} was modified, revalidate");
@@ -701,10 +698,7 @@ impl Validator {
         let mut buf = mem::take(&mut canvas.valid.buf);
 
         trace!("fill in known types for node {node_id} pins from the existing edges");
-        for edge in canvas
-            .node_edge_io_iter(node_id)
-            .expect("existence proved by caller")
-        {
+        for edge in canvas.node_edge_io_iter(node_id) {
             let other = edge.oppose(node_id);
             let ty = Validator::peek_pin_type(canvas, other)
                 .expect("correct edge maintenance guarantee existance of required nodes");

@@ -1,5 +1,5 @@
 use std::{
-    fmt::{Display, Formatter},
+    fmt::{Debug, Display, Formatter},
     ops::{Deref, DerefMut, Range},
 };
 
@@ -17,7 +17,7 @@ pub mod valid;
 #[derive(Debug)]
 pub struct Canvas<NodeMeta> {
     pub(crate) nodes: Vec<Node<NodeMeta>>,
-    pub(crate) edges: Vec<Edge>,
+    pub(crate) edges: Edges,
     pub(crate) predicates: Vec<CanvasPredicate<NodeMeta>>,
 
     rnd: SmallRng,
@@ -47,7 +47,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
-            edges: Vec::new(),
+            edges: Edges::new(),
             predicates: Vec::new(),
             root_nodes: Vec::new(),
             valid: valid::Validator::new(),
@@ -67,11 +67,14 @@ impl<NodeMeta> Canvas<NodeMeta> {
         let id = Id::new_node_after(last, &mut self.rnd)
             .expect("node ID generation failed, maybe ID pool is used up");
 
-        trace!("add node {id} with {} pins to the canvas. {stub:?}", stub.total_pin_count());
+        trace!(
+            "add node {id} with {} pins to the canvas. {stub:?}",
+            stub.total_pin_count()
+        );
         let pin_cnt = stub.total_pin_count();
         self.root_nodes.push(id);
         self.nodes.push(Node { id, stub, meta });
-        
+
         self.valid.add_node(id, pin_cnt as usize);
         id
     }
@@ -96,118 +99,11 @@ impl<NodeMeta> Canvas<NodeMeta> {
         })
     }
 
-    fn node_edge_io_ranges(&self, node_id: Id) -> Option<(Range<usize>, Range<usize>)> {
-        let range_out = {
-            let start_edge_out = Edge {
-                from: OutputPin(Pin { node_id, order: 0 }),
-                to: InputPin(Pin {
-                    node_id: Id(0),
-                    order: 0,
-                }),
-            };
-            let end_edge_out = Edge {
-                from: OutputPin(Pin {
-                    node_id,
-                    order: PinOrder::MAX,
-                }),
-                to: InputPin(Pin {
-                    node_id: Id(0),
-                    order: 0,
-                }),
-            };
-
-            let start = match self.edges.binary_search(&start_edge_out) {
-                Ok(idx) => idx,
-                Err(idx) => idx,
-            };
-            let end = match self.edges.binary_search(&end_edge_out) {
-                Ok(idx) => idx,
-                Err(idx) => idx,
-            };
-            let range = start..end;
-            if range.is_empty() {
-                trace!("no edges found for node {node_id} output");
-            } else {
-                trace!("edges found for node {node_id} output: {range:?}");
-            }
-            range
-        };
-
-        let range_in = {
-            let start_edge_in = Edge {
-                from: OutputPin(Pin {
-                    node_id: Id(0),
-                    order: 0,
-                }),
-                to: InputPin(Pin { node_id, order: 0 }),
-            };
-            let end_edge_in = Edge {
-                from: OutputPin(Pin {
-                    node_id: Id(0),
-                    order: 0,
-                }),
-                to: InputPin(Pin {
-                    node_id,
-                    order: PinOrder::MAX,
-                }),
-            };
-
-            let start = match self.edges.binary_search(&start_edge_in) {
-                Ok(idx) => idx,
-                Err(idx) => idx,
-            };
-            let end = match self.edges.binary_search(&end_edge_in) {
-                Ok(idx) => idx,
-                Err(idx) => idx,
-            };
-            let range = start..end;
-            if range.is_empty() {
-                trace!("no edges found for node {node_id} input");
-            } else {
-                trace!("edges found for node {node_id} input: {range:?}");
-            }
-            range
-        };
-
-        Some((range_in, range_out))
-    }
-
-    fn node_edge_io_slices(&self, node_id: Id) -> Option<(&[Edge], &[Edge])> {
-        let (inp, out) = self.node_edge_io_ranges(node_id)?;
-        Some((&self.edges[inp], &self.edges[out]))
-    }
-
-    fn node_edge_io_slices_mut(&mut self, node_id: Id) -> Option<(&mut [Edge], &mut [Edge])> {
-        let (inp, out) = self.node_edge_io_ranges(node_id)?;
-        let (i, o) = {
-            let reversed = if inp.start < out.start { false } else { true };
-            macro_rules! calc {
-                ($low:expr, $high:expr) => {{
-                    let (a, rest) = self.edges.split_at_mut($low.start);
-                    let (_, b) = rest.split_at_mut($high.end + 1 - $low.start);
-
-                    let a_len = $high.end - $high.start + 1;
-                    let b_len = $low.end - $low.start + 1;
-                    (&mut a[0..a_len], &mut b[0..b_len])
-                }};
-            }
-            if reversed {
-                // input > output
-                let (a, b) = calc!(out, inp);
-                (b, a)
-            } else {
-                // output > input
-                calc!(inp, out)
-            }
-        };
-        Some((i, o))
-    }
-
-    /// Iterator over all edges connected to the node.
-    /// Returns [None] if the node does not exist.
-    pub fn node_edge_io_iter(&self, node_id: Id) -> Option<impl Iterator<Item = Edge> + '_> {
-        let (slice_in, slice_out) = self.node_edge_io_slices(node_id)?;
-        Some(slice_in.iter().chain(slice_out.iter()).copied())
+    /// Iterator over all edges connected to the node. Iterator is empty if node
+    /// does not exist.
+    pub fn node_edge_io_iter(&self, node_id: Id) -> impl Iterator<Item = Edge> + Clone + '_ {
+        let (slice_in, slice_out) = self.edges.node_io(node_id);
+        slice_in.iter().chain(slice_out.iter()).copied()
     }
 
     pub(crate) fn node_id_to_idx(&self, id: Id) -> Option<NodeIdx> {
@@ -223,44 +119,21 @@ impl<NodeMeta> Canvas<NodeMeta> {
         &mut self,
         id: Id,
     ) -> Result<(Node<NodeMeta>, Vec<Edge>), NodeNotFoundError> {
-        // Remove all edges that are connected to the node.
-        let (inp, out) = self.node_edge_io_ranges(id).ok_or(NodeNotFoundError(id))?;
-        let (high, low) = if inp.start > out.start {
-            (inp, out)
-        } else {
-            (out, inp)
-        };
-        let mut edges = Vec::with_capacity(high.end - high.start + low.end - low.start);
-        // Remove in such order so to retain correct ranges. Higher range should be removed first,
-        // otherwise the lower range removal would shift the higher range.
-        edges.extend(self.edges.drain(high));
-        edges.extend(self.edges.drain(low));
-
-        // Remove node itself.
         let idx = self
             .nodes
             .binary_search_by_key(&id, |n| n.id)
-            .ok()
-            .expect("node should exist as above code checks for that");
-        let node = self.nodes.remove(idx);
+            .map_err(|_| NodeNotFoundError(id))?;
 
-        // Unmark the node as a root node.
+        let removed_edges = self.edges.remove_node(id);
+        let node = self.nodes.remove(idx);
         self.unroot_node(id);
-        
         self.valid.remove_node(id);
 
-        Ok((node, edges))
+        Ok((node, removed_edges))
     }
 
     pub fn edges(&self) -> impl Iterator<Item = Edge> + '_ {
         self.edges.iter().copied()
-    }
-
-    pub(crate) fn edges_inner(&self) -> impl Iterator<Item = EdgeInner> + '_ {
-        self.edges.iter().map(|e| EdgeInner {
-            from: (self.node_id_to_idx(e.from.node_id).unwrap(), e.from.order),
-            to: (self.node_id_to_idx(e.to.node_id).unwrap(), e.to.order),
-        })
     }
 
     /// Add the edge to the canvas. This will return the index of the edge in the canvas.
@@ -282,14 +155,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         self.unroot_node(to.node_id);
 
         let edge = Edge { from, to };
-        match self.edges.binary_search(&edge) {
-            Ok(_) => {
-                // Already added.
-            }
-            Err(idx) => {
-                self.edges.insert(idx, edge);
-            }
-        };
+        self.edges.insert_edge(edge);
 
         Ok(edge)
     }
@@ -303,11 +169,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
 
     /// Remove the edge from the canvas.
     pub fn remove_edge(&mut self, edge: Edge) -> Result<(), EdgeNotFoundError> {
-        let idx = self
-            .edges
-            .binary_search(&edge)
-            .map_err(|_| EdgeNotFoundError(edge))?;
-        self.edges.remove(idx);
+        self.edges.remove_edge(edge)?;
         self.valid.remove_edge(edge);
         Ok(())
     }
@@ -358,9 +220,7 @@ impl<NodeMeta> Canvas<NodeMeta> {
         trace!("shift edges to accommodate added pins");
         let shift_at = range.start;
         let shift_cnt = range.len() as PinOrder;
-        let (inp, _) = self
-            .node_edge_io_slices_mut(node_id)
-            .expect("we found the node in this call already");
+        let (inp, _) = self.edges.node_io_mut(node_id);
         for edge in inp {
             if edge.to.order >= shift_at {
                 edge.to.order += shift_cnt;
@@ -397,28 +257,24 @@ impl<NodeMeta> Canvas<NodeMeta> {
         }
 
         trace!("remove edges that are no longer valid");
-        let mut vec = SmallVec::<[EdgeIdx; 128]>::new();
-        let (inp, _) = self
-            .node_edge_io_ranges(node_id)
-            .expect("we found the node in this call already");
-        for edge_idx in inp {
-            let edge = &self.edges[edge_idx as usize];
+        let mut vec = SmallVec::<[Edge; 128]>::new();
+        let (inp, _) = self.edges.node_io(node_id);
+        for &edge in inp {
             if range.contains(&edge.to.order) {
-                vec.push(edge_idx as EdgeIdx);
+                vec.push(edge);
             }
         }
-        // Remove from the end as this slightly reduces amount of data moves required,
-        // due to a usage of simple vector for edge storage.
-        for edge_idx in vec.into_iter().rev() {
-            self.edges.remove(edge_idx as usize);
+        // Remove from the end as otherwise we would shift the indices.
+        for edge in vec.into_iter().rev() {
+            self.edges
+                .remove_edge(edge)
+                .expect("exists as we found it above");
         }
 
         trace!("shift edges to accommodate removed pins");
         let shift_at = range.end;
         let shift_cnt = range.len() as PinOrder;
-        let (inp, _) = self
-            .node_edge_io_slices_mut(node_id)
-            .expect("we found the node in this call already");
+        let (inp, _) = self.edges.node_io_mut(node_id);
         for edge in inp {
             if edge.to.order >= shift_at {
                 edge.to.order -= shift_cnt;
@@ -470,7 +326,7 @@ pub struct Node<Meta> {
 
 pub type PinOrder = u8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pin {
     /// The ID of the node this pin belongs to.
     pub node_id: Id,
@@ -497,13 +353,19 @@ impl Display for Pin {
     }
 }
 
+impl Debug for Pin {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pin({})", self)
+    }
+}
+
 /// The [Pin] that is used as an ontput from the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OutputPin(pub Pin);
 
 impl Display for OutputPin {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        Display::fmt(&self.0, f)
     }
 }
 
@@ -513,7 +375,7 @@ pub struct InputPin(pub Pin);
 
 impl Display for InputPin {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        Display::fmt(&self.0, f)
     }
 }
 
@@ -545,12 +407,6 @@ impl DerefMut for InputPin {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct EdgeInner {
-    pub from: (NodeIdx, PinOrder),
-    pub to: (NodeIdx, PinOrder),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
     pub from: OutputPin,
@@ -560,6 +416,212 @@ pub struct Edge {
 impl Display for Edge {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} -> {}", self.from, self.to)
+    }
+}
+
+impl Edge {
+    /// Create an edge that is the opposite of this edge.
+    pub fn reverse(self) -> Self {
+        Edge {
+            from: OutputPin(self.to.0),
+            to: InputPin(self.from.0),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Edges {
+    /// There are two halves of this vec. We keep one [Vec] for performance to reduce
+    /// number of (re)-allocations required.
+    ///
+    ///  # First Half
+    /// Actual edges in the canvas.
+    /// Sorted array for binary search.
+    ///
+    /// # Second Half
+    /// Edges in the canvas sorted in the order of reversed edge direction.
+    /// Basically, input and output are swapped.
+    /// This allows for binary search for receiving node's edges, whereas
+    /// normal [Self::vec] array is used for searching for the sending node's edges.
+    vec: Vec<Edge>,
+}
+
+impl Edges {
+    pub fn new() -> Self {
+        Self { vec: Vec::new() }
+    }
+
+    fn midpoint(&self) -> usize {
+        self.vec.len() / 2
+    }
+
+    pub fn direct(&self) -> &[Edge] {
+        self.as_ref().0
+    }
+
+    pub fn direct_mut(&mut self) -> &mut [Edge] {
+        self.as_mut().0
+    }
+
+    pub fn rev(&self) -> &[Edge] {
+        self.as_ref().1
+    }
+
+    pub fn rev_mut(&mut self) -> &mut [Edge] {
+        self.as_mut().1
+    }
+
+    pub fn as_ref(&self) -> (&[Edge], &[Edge]) {
+        let midpoint = self.midpoint();
+        self.vec.split_at(midpoint)
+    }
+
+    pub fn as_mut(&mut self) -> (&mut [Edge], &mut [Edge]) {
+        let midpoint = self.midpoint();
+        self.vec.split_at_mut(midpoint)
+    }
+
+    pub fn insert_edge(&mut self, edge: Edge) {
+        let idx = match self.direct().binary_search(&edge) {
+            Ok(_) => return,
+            Err(idx) => idx,
+        };
+
+        let rev_idx = match self.rev().binary_search_by(|v| v.cmp(&edge.reverse())) {
+            Ok(_) => unreachable!(
+                "above (non-returned) condition on `vec` should prevent this condition from happening"
+            ),
+            Err(idx) => idx,
+        };
+
+        self.vec.reserve(2);
+        self.vec.insert(rev_idx + self.midpoint(), edge);
+        self.vec.insert(idx, edge);
+    }
+
+    pub fn remove_edge(&mut self, edge: Edge) -> Result<(), EdgeNotFoundError> {
+        let idx = match self.direct().binary_search(&edge) {
+            Ok(idx) => idx,
+            Err(_) => return Err(EdgeNotFoundError(edge)),
+        };
+
+        let rev_idx = match self.rev().binary_search_by(|v| v.from.0.cmp(&edge.to.0)) {
+            Ok(idx) => idx,
+            Err(_) => {
+                unreachable!("edge should be present in the reverse array as it is in direct")
+            }
+        };
+
+        self.vec.remove(rev_idx + self.midpoint());
+        self.vec.remove(idx);
+        Ok(())
+    }
+
+    /// Remove all edges associated with the given node ID.
+    pub fn remove_node(&mut self, id: Id) -> Vec<Edge> {
+        // Remove all edges that are connected to the node.
+        let (inp, out) = self.node_io_ranges(id);
+
+        let mut edges = Vec::with_capacity((inp.end - inp.start) + (out.end - out.start));
+        assert!(
+            inp.end <= out.start,
+            "input edges expected to be before output edges"
+        );
+        // Remove in such order so to retain correct ranges. Higher range should be removed first,
+        // otherwise the lower range removal would shift the higher range.
+        let corrected_out = (out.start + self.midpoint())..(out.end + self.midpoint());
+        edges.extend(self.vec.drain(corrected_out));
+        edges.extend(self.vec.drain(inp));
+
+        edges
+    }
+
+    /// Find ranges between two edges. This to be used for finding all edges between two nodes.
+    /// Expected use assumes either pin is to `Id(0)` or [Id::MAX] node,
+    /// which should never be constructed,
+    /// and hence is never found in actual array, but allows to get the positions for
+    /// the edges that would be stored for another pin.
+    fn find_range_for<F>(slice: &[Edge], a: Edge, b: Edge, mut f: F) -> Range<usize>
+    where
+        F: FnMut(Edge, Edge) -> std::cmp::Ordering,
+    {
+        let start = match slice.binary_search_by(|&v| f(v, a)) {
+            Ok(_) => unreachable!("implies existing node with ID that should never be constructed"),
+            Err(idx) => idx,
+        };
+        let end = match slice.binary_search_by(|&v| f(v, b)) {
+            Ok(_) => unreachable!("implies existing node with ID that should never be constructed"),
+            Err(idx) => idx,
+        };
+
+        let range = start..end;
+        if range.is_empty() {
+            trace!("no edges found");
+        } else {
+            trace!("{} edges found", range.len());
+        }
+        trace!("range: {range:?}");
+
+        range
+    }
+
+    /// Get the range for each array of edges that are connected to the node.
+    fn node_io_ranges(&self, node_id: Id) -> (Range<usize>, Range<usize>) {
+        let start = Edge {
+            from: OutputPin(Pin { node_id, order: 0 }),
+            to: InputPin(Pin {
+                node_id: Id(0),
+                order: 0,
+            }),
+        };
+        let end = Edge {
+            from: OutputPin(Pin {
+                node_id,
+                order: PinOrder::MAX,
+            }),
+            to: InputPin(Pin {
+                node_id: Id::MAX,
+                order: PinOrder::MAX,
+            }),
+        };
+
+        let range_out = {
+            trace!("searching for edges from {node_id}");
+            Self::find_range_for(self.rev(), start, end, |a, b| b.cmp(&a.reverse()).reverse())
+        };
+
+        let range_in = {
+            trace!("searching for edges to {node_id}");
+            Self::find_range_for(self.direct(), start, end, |a, b| a.cmp(&b))
+        };
+
+        (range_in, range_out)
+    }
+
+    pub fn node_io(&self, node_id: Id) -> (&[Edge], &[Edge]) {
+        let (inp, out) = self.node_io_ranges(node_id);
+        let (i, o) = self.as_ref();
+        (&i[inp], &o[out])
+    }
+
+    pub fn node_io_mut(&mut self, node_id: Id) -> (&mut [Edge], &mut [Edge]) {
+        let (inp, out) = self.node_io_ranges(node_id);
+        let (i, o) = self.as_mut();
+        (&mut i[inp], &mut o[out])
+    }
+}
+
+impl Deref for Edges {
+    type Target = [Edge];
+
+    fn deref(&self) -> &Self::Target {
+        self.direct()
+    }
+}
+
+impl DerefMut for Edges {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.direct_mut()
     }
 }
 
@@ -581,8 +643,15 @@ impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use IdKind::*;
         match self.id_kind() {
-            Node => write!(f, "Node{}", self.unprefix()),
-            Predicate => write!(f, "Predicate{}", self.unprefix()),
+            Some(Node) => write!(f, "Node{}", self.unprefix()),
+            Some(Predicate) => write!(f, "Predicate{}", self.unprefix()),
+            None => {
+                if self == &Id::MAX {
+                    write!(f, "Id(MAX)")
+                } else {
+                    write!(f, "Id({})", self.0)
+                }
+            }
         }
     }
 }
@@ -590,6 +659,10 @@ impl std::fmt::Display for Id {
 impl Id {
     pub const NODE_PREFIX: IdInnerType = 0x4000_0000;
     pub const PREDICATE_PREFIX: IdInnerType = 0x2000_0000;
+
+    /// Maximum value of the ID, that guarantees no bigger ID can be generated.
+    /// This is not a valid ID by itself.
+    pub const MAX: Id = Id(IdInnerType::MAX);
 
     pub const RND_MAX_STEP: IdInnerType = 128;
 
@@ -625,21 +698,22 @@ impl Id {
 
     /// Kind of the ID.
     ///
-    /// # Panic
-    /// This function will panic if the ID is neither a node nor a predicate.
-    /// This should not be possible unless the ID was constructed manually.
-    pub const fn id_kind(&self) -> IdKind {
+    /// This function will return [None] if the ID is neither a node nor a predicate.
+    /// This should not be possible unless the ID was constructed manually. It will
+    /// return [None] in case ID is both a node and a predicate as well, which can happen
+    /// due to the same reasons.
+    pub const fn id_kind(&self) -> Option<IdKind> {
         let is_node = self.0 & Self::NODE_PREFIX != 0;
         let is_predicate = self.0 & Self::PREDICATE_PREFIX != 0;
 
         if is_node == is_predicate {
-            panic!("ID has to be either a node or a predicate");
+            None
         } else if is_node {
-            IdKind::Node
+            Some(IdKind::Node)
         } else if is_predicate {
-            IdKind::Predicate
+            Some(IdKind::Predicate)
         } else {
-            panic!("should not be reachable");
+            None
         }
     }
 }
@@ -1822,7 +1896,7 @@ mod test {
 
         let outa = OutputPin(Pin {
             node_id: a,
-            order: 0,
+            order: 1,
         });
         let inpb = InputPin(Pin {
             node_id: b,
@@ -1830,7 +1904,7 @@ mod test {
         });
         let outb = OutputPin(Pin {
             node_id: b,
-            order: 0,
+            order: 1,
         });
         let inpc = InputPin(Pin {
             node_id: c,
@@ -1838,7 +1912,7 @@ mod test {
         });
         let outc = OutputPin(Pin {
             node_id: a,
-            order: 0,
+            order: 1,
         });
         let inpa = InputPin(Pin {
             node_id: a,
@@ -1900,19 +1974,25 @@ mod test {
         let bc = canvas.add_edge_by_parts(outb, inpc).unwrap();
         let ca = canvas.add_edge_by_parts(outc, inpa).unwrap();
 
-        let mut iter = canvas.node_edge_io_iter(a).unwrap();
+        // println!("{:#?}", canvas.edges.direct());
+        // println!("{:#?}\n", canvas.edges.rev());
+
+        let mut iter = canvas.node_edge_io_iter(a);
+        println!("{:#?}", iter.clone().collect::<Vec<_>>());
         assert_eq!(iter.next(), Some(ab));
         assert_eq!(iter.next(), Some(ca));
         assert_eq!(iter.next(), None);
 
-        let mut iter = canvas.node_edge_io_iter(b).unwrap();
-        assert_eq!(iter.next(), Some(ab));
+        let mut iter = canvas.node_edge_io_iter(b);
+        println!("{:#?}", iter.clone().collect::<Vec<_>>());
         assert_eq!(iter.next(), Some(bc));
+        assert_eq!(iter.next(), Some(ab));
         assert_eq!(iter.next(), None);
 
-        let mut iter = canvas.node_edge_io_iter(c).unwrap();
-        assert_eq!(iter.next(), Some(bc));
+        let mut iter = canvas.node_edge_io_iter(c);
+        println!("{:#?}", iter.clone().collect::<Vec<_>>());
         assert_eq!(iter.next(), Some(ca));
+        assert_eq!(iter.next(), Some(bc));
         assert_eq!(iter.next(), None);
     }
 }
