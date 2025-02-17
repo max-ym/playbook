@@ -71,6 +71,7 @@ impl AssignedType {
     pub fn union_type_with(&mut self, ty: HintedPrimitiveType) -> TypePrecision {
         use TypePrecision::*;
 
+        trace!("union op., clarifying type {:#?} with {ty:#?}", self.ty);
         match &mut self.ty {
             Ok(prev) => match prev.clarify(&ty) {
                 (_, Same) => Same,
@@ -552,16 +553,17 @@ impl Validator {
         canvas: &mut Canvas<T>,
         pin: Pin,
     ) -> Result<&NodeData, PinQueryError> {
-        let mut nodes_modified = std::mem::take(&mut canvas.valid.nodes_modified);
-        for modified in nodes_modified.drain() {
-            let idx = canvas
-                .node_id_to_idx(modified)
-                .expect("correct maintenance of the nodes_modified set");
-            canvas.valid.resolv_stack.unstuck(idx);
-        }
-        canvas.valid.nodes_modified = nodes_modified;
+        // let mut nodes_modified = std::mem::take(&mut canvas.valid.nodes_modified);
+        // for modified in nodes_modified.drain() {
+        //     let idx = canvas
+        //         .node_id_to_idx(modified)
+        //         .expect("correct maintenance of the nodes_modified set");
+        //     canvas.valid.resolv_stack.unstuck(idx);
+        // }
+        // canvas.valid.nodes_modified = nodes_modified;
 
         // Next node to resolve.
+        assert!(canvas.valid.resolv_stack.len() == 0);
         canvas.valid.resolv_stack.push(
             canvas
                 .node_id_to_idx(pin.node_id)
@@ -689,7 +691,7 @@ impl Validator {
             .stub
             .total_pin_count() as usize;
 
-        trace!("preload default (unresolved) types for node {node_id} pins");
+        trace!("preload default (unresolved) types for node {node_id} pins, count: {pin_cnt}");
         canvas.valid.buf.clear();
         canvas.valid.buf.resize_with(pin_cnt, Default::default);
 
@@ -702,7 +704,7 @@ impl Validator {
             let other = edge.oppose(node_id);
             let ty = Validator::peek_pin_type(canvas, other)
                 .expect("correct edge maintenance guarantee existance of required nodes");
-            buf[other.order as usize].ty = Ok(ty.cloned().unwrap_or(HintedPrimitiveType::Hint));
+            buf[edge.this(node_id).order as usize].ty = Ok(ty.cloned().unwrap_or(HintedPrimitiveType::Hint));
         }
         canvas.valid.buf = buf;
 
@@ -849,6 +851,15 @@ impl Edge {
         } else {
             debug_assert_eq!(self.to.node_id, this_node_id);
             *self.from
+        }
+    }
+
+    fn this(self, this_node_id: Id) -> Pin {
+        if self.from.node_id == this_node_id {
+            *self.from
+        } else {
+            debug_assert_eq!(self.to.node_id, this_node_id);
+            *self.to
         }
     }
 }
@@ -1480,11 +1491,11 @@ impl<'pins> ResolvePinTypes<'pins> {
         let mut is_progress = false;
 
         macro_rules! iterate {
-            ($kind:ident) => {
+            ($kind:ident, $offset:expr) => {
                 if let Some($kind) = node.$kind() {
                     for (i, t) in $kind.iter().copied().enumerate() {
                         use TypePrecision::*;
-                        match pins[i].union_type_with(t.into()) {
+                        match pins[i + $offset].union_type_with(t.into()) {
                             Same | Uncertain => {}
                             Precise => is_progress = true,
                             Incompatible => {
@@ -1504,11 +1515,11 @@ impl<'pins> ResolvePinTypes<'pins> {
             };
         }
 
-        trace!("static inputs prefill");
-        iterate!(static_inputs);
+        trace!("static inputs prefill for {node:#?}");
+        iterate!(static_inputs, 0);
 
-        trace!("static outputs prefill");
-        iterate!(static_outputs);
+        trace!("static outputs prefill for {node:#?}");
+        iterate!(static_outputs, node.output_pin_start_idx() as usize);
 
         trace!("static prefill progress = {is_progress}");
         Ok(is_progress)
