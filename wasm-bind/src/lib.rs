@@ -1,3 +1,30 @@
+//! This project is designed to interoperate with frontend JS side to provide
+//! a bridge between Rust implementation of validation logic and the frontend
+//! implementation of the UI.
+//! 
+//! # Fake Server
+//! The fake server mode will be applied if WASM package is compiled with corresponding
+//! feature enabled.
+//! 
+//! When the project is compiled to WASM, it will provide a fake server implementation
+//! that simulates some calls to the server with predefined data set. For functions that
+//! support fake server mode, the documentation mentions of how it is simulated
+//! and which arguments are allowed to be passed. Note that those functions may
+//! not support all features of actual server implementation, but are designed
+//! to aid testing and development.
+//! 
+//! ## Basic Use Flow
+//! 1. List available project - not currently implemented!
+//! 2. Load project by zero UUID - [JsProject::load](project::JsProject::load).
+//!    [Work Session](work_session::JsWorkSession) will then have a project available to work with.
+//!    Since there is only one project loaded, it will be automatically selected as
+//!    the current project.
+//! 3. Use [Canvas](project::JsCanvas) for reading and editing nodes and edges.
+//! 4. Use [Work Session History](work_session::JsHistory) to undo and redo changes of the
+//!    current project. Currently, it does not support actually providing meaningful
+//!    information about change itself, but undo/redo operations would perform the changes
+//!    over the canvas. Full reload of the canvas would allow to render the changes for now.
+
 use js_sys::JsString;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
