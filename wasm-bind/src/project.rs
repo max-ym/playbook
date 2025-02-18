@@ -305,6 +305,52 @@ pub struct JsNodeStub {
     stub: canvas::NodeStub,
 }
 
+#[wasm_bindgen(js_class = NodeStub)]
+impl JsNodeStub {
+    /// Get kind of the node stub.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> JsNodeStubKind {
+        use canvas::NodeStub as R;
+        use JsNodeStubKind as JS;
+
+        match &self.stub {
+            R::File => JS::File,
+            R::SplitBy { .. } => JS::SplitBy,
+            R::Input { .. } => JS::Input,
+            R::Drop => JS::Drop,
+            R::Output { .. } => JS::Output,
+            R::StrOp(op) => match op {
+                canvas::StrOp::Lowercase => JS::Lowercase,
+                canvas::StrOp::Uppercase => JS::Uppercase,
+                canvas::StrOp::Strip { .. } => JS::Strip,
+            },
+            R::Compare { .. } => JS::Compare,
+            R::Ordering => JS::Ordering,
+            R::Regex(_) => JS::Regex,
+            R::FindRecord { .. } => JS::FindRecord,
+            R::Map { .. } => JS::Map,
+            R::List { .. } => JS::List,
+            R::IfElse { .. } => JS::IfElse,
+            R::OkOrErr => JS::OkOrErr,
+            R::Validate { .. } => JS::Validate,
+            R::SelectFirst { .. } => JS::SelectFirst,
+            R::ExpectOne { .. } => JS::ExpectOne,
+            R::ExpectSome { .. } => JS::ExpectSome,
+            R::Match { .. } => JS::Match,
+            R::Func { .. } => JS::Func,
+            R::ParseDateTime { .. } => JS::ParseDateTime,
+            R::ParseMonetary { .. } => JS::ParseMonetary,
+            R::ParseInt { .. } => JS::ParseInt,
+            R::Constant(_) => JS::Constant,
+            R::OkOrCrash { .. } => JS::OkOrCrash,
+            R::Crash { .. } => JS::Crash,
+            R::Unreachable { .. } => JS::Unreachable,
+            R::Todo { .. } => JS::Todo,
+            R::Comment { .. } => JS::Comment,
+        }
+    }
+}
+
 impl From<canvas::NodeStub> for JsNodeStub {
     fn from(stub: canvas::NodeStub) -> Self {
         Self { stub }
@@ -1139,6 +1185,7 @@ pub enum JsNodeStubKind {
     Compare,
     Ordering,
     Regex,
+    FindRecord,
     Map,
     List,
     IfElse,
