@@ -178,6 +178,18 @@ impl JsProject {
             project_uuid: self.uuid,
         }
     }
+
+    /// Get the metadata associated with the project by the client.
+    #[wasm_bindgen(getter)]
+    pub fn meta(&self) -> JsValue {
+        todo!()
+    }
+
+    /// Set the metadata associated with the project by the client.
+    #[wasm_bindgen(setter)]
+    pub fn set_meta(&self, meta: JsValue) {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
