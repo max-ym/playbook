@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    work_session::{self, wsr, wsw, DetectChangedStack},
+    work_session::{self, wsr, wsw, CheckoutChangedStack},
     InvalidHandleError, MyUuid, PermissionError,
 };
 
@@ -398,7 +398,7 @@ impl JsNode {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = NodeIter)]
 pub struct JsNodeIter {
-    detect_change: DetectChangedStack,
+    detect_change: CheckoutChangedStack,
 
     project_uuid: Uuid,
     pos: usize,
