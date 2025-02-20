@@ -6,18 +6,36 @@ use crate::*;
 /// downstream dependencies locally, if possible. And then commit the changes to the server.
 ///
 /// On deploy commits,
-/// the server will run full validations of the project and all dependencies, even those
-/// that cannot be accessed by the user. In turn, server will return the validation results
-/// to the client, with whether the commit was successful or was denied.
+/// the server will run full validations of the project and all other projects that depend on it.
+/// Even those,
+/// that cannot be accessed by the user.
+/// 
+/// The API of WorkSession
+/// allows to retrieve dependencies that are accessible by the user and validate them
+/// locally. This is optional, but can provide some insights into potential issues with the project
+/// before attempting to deploy. Inaccessible dependencies will be omitted from the list and
+/// will be validated only on the server.
+///
+/// All project that are using this one as their dependency and are configured to automatically
+/// update to the latest version, will be updated to the new version of this project.
+/// Update is not performed if the validation of the updated resulting project fails,
+/// then such dependencies will be held back until either the issues are resolved
+/// or some user later updates those projects manually to be compatible
+/// with the new version of this deployed project's version.
 /// 
 /// Server will save previous validation runs stored in cache, so even though effectively this is a
 /// "full validation" run, in reality only changed things are incrementally re-validated,
-/// which makes the process fast.
+/// which should make the process fast.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = CommitBuilder)]
 pub struct JsCommitBuilder {
     #[wasm_bindgen(getter_with_clone)]
     pub message: JsString,
+
+    /// Additional metadata to be associated with the commit.
+    /// This, for example, may contain the user id or username.
+    #[wasm_bindgen(getter_with_clone)]
+    pub meta: JsValue,
 }
 
 #[wasm_bindgen(js_class = CommitBuilder)]
@@ -25,37 +43,26 @@ impl JsCommitBuilder {
     /// Create a new commit builder object with the given commit/deploy message.
     #[wasm_bindgen(constructor)]
     pub fn new(message: JsString) -> Self {
-        Self { message }
+        Self { message, meta: JsValue::NULL }
     }
 
     /// Commit the project changes. If commit succeeds, returns the commit object, and makes
     /// this builder unusable (further operations will throw exceptions).
+    /// If new commit is to be made, new builder instance should be created.
     pub async fn commit(&self) -> Result<JsCommitOutcome, JsCommitError> {
         todo!()
     }
 
     /// Deploy the project with the given version tag. The tag should be unique per project.
     /// Can throw exception if the tag is already used or if there are issues
-    /// with the project, commit, or downstream dependencies, or server connectivity.
+    /// with the project, commit, server connectivity. This is rejected if
+    /// tag violates version precedence rules - it is not allowed to deploy a version
+    /// that is not greater than the latest deployed version.
     ///
     /// The builder will be unusable after successful deploy
     /// (further operations will throw exceptions).
     #[wasm_bindgen(js_name = commitWithTag)]
     pub async fn deploy_with_tag(&self, tag: JsString) -> Result<JsCommitOutcome, JsCommitError> {
-        todo!()
-    }
-
-    /// Get array of downstream dependencies of the project.
-    /// Can throw exception if there are issues with loading of the dependencies.
-    ///
-    /// This should be called in order for validations to include the dependencies.
-    /// Otherwise, them will be skipped locally. However, server always validates all dependencies.
-    /// If dependency list is loaded, each individual dependency should in turn be loaded.
-    /// Some may not be accessible due to permissions, so they effectively can be skipped and then
-    /// they will not be accounted for in the validation.
-    ///
-    /// Will throw an exception if this builder was invalidated.
-    pub async fn downstreams(&self) -> Result<Vec<JsDownstreamDependency>, JsLoadDepsError> {
         todo!()
     }
 
@@ -79,7 +86,7 @@ pub struct JsCommit {
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub tag: Option<JsString>,
 
-    /// For deploys, they can be yanked and
+    /// For deploy, it can be yanked and
     /// if it was, this will return a hash of the commit on which this operation was carried out.
     /// Will return `undefined` if the deploy was not yanked or if the commit is not a deploy.
     #[wasm_bindgen(readonly, getter_with_clone, js_name = yankedWith)]
@@ -98,9 +105,10 @@ pub struct JsCommit {
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub timestamp: u64,
 
-    /// The commit author.
+    /// The additional metadata of the commit that was associated
+    /// by the client.
     #[wasm_bindgen(readonly, getter_with_clone)]
-    pub author: JsString,
+    pub meta: JsValue,
 }
 
 #[wasm_bindgen(js_class = Commit)]
@@ -160,7 +168,10 @@ impl JsCommitOutcome {
         todo!()
     }
 
-    /// The validation outcome of the project.
+    /// The validation outcome of the project. This comes from the server and
+    /// thus accounts for all dependencies, including those that are not accessible
+    /// by the user. Sensitive information that cannot be viewed by the user
+    /// will be obscured or omitted as applicable.
     #[wasm_bindgen(getter, js_name = validationOutcome)]
     pub fn validation_outcome(&self) -> JsValidationOutcome {
         todo!()
@@ -260,7 +271,7 @@ impl JsDownstreamDependency {
     /// is permitted to be loaded or not.
     /// Basically, this indicates whether or not this dependency should be loaded
     /// to be useful for validation, skipping any dependency chains that are interrupted due
-    /// to permissions.
+    /// to permissions, as those would be useless for the validator.
     #[wasm_bindgen(getter, js_name = shouldLoad)]
     pub fn should_load(&self) -> bool {
         todo!()
@@ -270,7 +281,7 @@ impl JsDownstreamDependency {
     /// This will fail if the user has insufficient permissions to load the dependency, or
     /// network issues prevent loading of the dependency.
     /// This is no-op if the dependency is already loaded into the work session either as a
-    /// standalone project or as a dependency (without unneeded UI-related meta).
+    /// standalone project or as a dependency (that is, without UI-related meta).
     ///
     /// This takes into account `resolveWith` setting which selects effective version
     /// that will be used for validation.
@@ -397,9 +408,9 @@ impl JsHistoryItem {
         todo!()
     }
 
-    /// The commit author.
+    /// The commit meta previously set by the client.
     #[wasm_bindgen(getter)]
-    pub fn author(&self) -> JsString {
+    pub fn meta(&self) -> JsValue {
         todo!()
     }
 }
