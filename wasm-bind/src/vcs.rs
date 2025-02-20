@@ -1,4 +1,3 @@
-use compact_str::CompactString;
 use project::JsProtect;
 use uuid::Uuid;
 
