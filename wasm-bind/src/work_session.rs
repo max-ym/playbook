@@ -38,7 +38,9 @@ pub use wsw;
 /// Access current work session lock.
 pub fn work_session() -> &'static RwLock<WorkSession> {
     WORK_SESSION.get_or_init(|| {
-        let _ = console_log::init();
+        let _ = console_log::init_with_level(
+            log::STATIC_MAX_LEVEL.to_level().unwrap_or(log::Level::Info),
+        );
         RwLock::new(WorkSession::new())
     })
 }
@@ -242,11 +244,11 @@ impl WorkSessionProject {
         self.changes.stack.get(pos)
     }
 
-    /// Detect changes in the stack of changes. This is used to detect if the project
+    /// Checkout changes in the stack of changes. This is used to detect if the project
     /// was changed since some state, either because of new operations, or because
     /// of undo/redo operations.
-    pub fn detect_changed_stack(&self) -> DetectChangedStack {
-        DetectChangedStack {
+    pub fn detect_changed_stack(&self) -> CheckoutChangedStack {
+        CheckoutChangedStack {
             pos: self.changes.pos,
             time: self
                 .changes
@@ -264,6 +266,7 @@ impl WorkSessionProject {
         self.changes.stack.push(ChangeItem {
             timestamp: std::time::SystemTime::now(),
             op,
+            meta: JsValue::NULL,
         });
         self.changes.pos += 1;
     }
@@ -495,6 +498,15 @@ impl JsHistory {
             project_uuid: project.uuid(),
         })
     }
+
+    /// Length of the history stack of changes in the current project, disregarding
+    /// the current position.
+    #[wasm_bindgen(js_name = length, getter)]
+    pub fn length() -> usize {
+        let ws = work_session().read().expect(WORK_SESSION_POISONED);
+        let project = ws.current_project();
+        project.map_or(0, |p| p.changes.stack.len())
+    }
 }
 
 /// A change in the project. This defines the operation that was performed, and that
@@ -563,6 +575,29 @@ pub struct JsChangeOp {
     // TODO
 }
 
+#[wasm_bindgen(js_class = ChangeOp)]
+impl JsChangeOp {
+    // TODO
+
+    /// Set metadata for this history item. This allows UI to associate some
+    /// additional information with the change, and removes the responsibility of
+    /// managing the lifecycle of the metadata from the caller. E.g. if this history
+    /// item gets dropped, associated metadata will be dropped automatically as well, without
+    /// any JS intervention.
+    #[wasm_bindgen(js_name = meta, getter)]
+    pub fn set_meta(&mut self, js: JsValue) {
+        // TODO
+    }
+
+    /// Get metadata associated with this history item.
+    /// See [JsChangeOp::set_meta] for more information.
+    #[wasm_bindgen(js_name = meta, getter)]
+    pub fn get_meta(&self) -> JsValue {
+        // TODO
+        JsValue::NULL
+    }
+}
+
 /// Error when trying to access an uninitialized or incorrectly initialized work session.
 #[wasm_bindgen(js_name = WorkSessionUninitError)]
 pub struct JsWorkSessionUninitError {
@@ -591,10 +626,10 @@ impl ChangeStack {
     }
 }
 
-/// Detect changes in the stack of changes. This is used to detect if the project
+/// Checkout changes in the stack of changes. This is used to detect if the project
 /// was changed since some state.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DetectChangedStack {
+pub struct CheckoutChangedStack {
     /// Position in the history stack.
     pos: usize,
 
@@ -605,6 +640,11 @@ pub struct DetectChangedStack {
 pub struct ChangeItem {
     timestamp: std::time::SystemTime,
     op: ChangeOp,
+
+    /// Metadata associated with the change. This allows to
+    /// manage the lifecycle of the value with the history item
+    /// itself, so that JS side is not responsible for resource management.
+    meta: JsValue,
 }
 
 impl ChangeItem {
