@@ -247,7 +247,7 @@ impl WorkSessionProject {
     /// Checkout changes in the stack of changes. This is used to detect if the project
     /// was changed since some state, either because of new operations, or because
     /// of undo/redo operations.
-    pub fn detect_changed_stack(&self) -> CheckoutChangedStack {
+    pub fn stack_checkout(&self) -> CheckoutChangedStack {
         CheckoutChangedStack {
             pos: self.changes.pos,
             time: self
@@ -277,7 +277,7 @@ impl WorkSessionProject {
         self.revalidate = true;
     }
 
-    pub fn add_node(&mut self, stub: canvas::NodeStub, meta: serde_json::Value) -> canvas::Id {
+    pub fn add_node(&mut self, stub: canvas::NodeStub, meta: JsValue) -> canvas::Id {
         trace!("add node to the project: {stub:#?}, {meta:#?}");
         self.require_revalidate();
         let id = self
@@ -324,9 +324,13 @@ impl WorkSessionProject {
     pub fn patch_node_meta(
         &mut self,
         node_id: canvas::Id,
-        patch: serde_json::Value,
+        patch: JsValue,
     ) -> Result<(), NodeNotFoundError> {
-        trace!("patch metadata of node {node_id} in the project: {patch:#?}");
+        // TODO rework, as it looks like we overcomplicated this. Do we even need to store
+        // "patch"? Maybe let this to be computed on JS side?
+        let rust_patch: serde_json::Value =
+            serde_wasm_bindgen::from_value(patch.clone()).expect("object should be deserializable");
+        trace!("patch metadata of node {node_id} in the project: {rust_patch:#?}");
         let backup = {
             let node = self
                 .project
@@ -334,7 +338,11 @@ impl WorkSessionProject {
                 .node_mut(node_id)
                 .ok_or(NodeNotFoundError(node_id))?;
             let backup = node.meta.clone();
-            json_patch::merge(&mut node.meta, &patch);
+            let mut rust_meta = serde_wasm_bindgen::from_value(backup.clone())
+                .expect("object should be serializable");
+            json_patch::merge(&mut rust_meta, &rust_patch);
+            node.meta =
+                serde_wasm_bindgen::to_value(&rust_meta).expect("object should be serializable");
             backup
         };
         self.record(ChangeOp::AlterNodeMetadata {
@@ -665,7 +673,7 @@ pub enum ChangeOp {
     /// Add a node to the canvas.
     AddNode {
         stub: Box<canvas::NodeStub>,
-        meta: serde_json::Value,
+        meta: JsValue,
         id: canvas::Id,
     },
 
@@ -673,7 +681,7 @@ pub enum ChangeOp {
     RemoveNode {
         removed_edges: Vec<canvas::Edge>,
         stub: Box<canvas::NodeStub>,
-        meta: serde_json::Value,
+        meta: JsValue,
         id: canvas::Id,
     },
 
@@ -688,14 +696,14 @@ pub enum ChangeOp {
         /// Node in which the metadata was changed.
         node_id: canvas::Id,
 
-        /// Values to (re)set in the metadata.
+        /// Values to (re)set in the metadata, as a JSON map.
         ///
-        /// For edits, the value is the new value intead of the existing one.
+        /// For edits, the value is the new value instead of the existing one.
         /// All null values in a map are removed from the metadata.
-        patch: serde_json::Value,
+        patch: JsValue,
 
         /// Pre-patch values to revert the metadata back to the original state.
-        backup: serde_json::Value,
+        backup: JsValue,
     },
 }
 
@@ -769,20 +777,25 @@ impl ChangeOp {
                 patch,
                 backup: _,
             } => {
+                const EXPECT: &str = "object should be deserializable";
+                let patch = serde_wasm_bindgen::from_value(patch).expect(EXPECT);
+
                 let meta = &mut project
                     .project
                     .canvas_mut()
                     .node_mut(node_id)
                     .expect(EXPECT_FOUND_NODE)
                     .meta;
+                let mut meta: serde_json::Value =
+                    serde_wasm_bindgen::from_value(meta.clone()).expect(EXPECT);
                 let backup = meta.clone();
 
-                json_patch::merge(meta, &patch);
+                json_patch::merge(&mut meta, &patch);
 
                 AlterNodeMetadata {
                     node_id,
-                    patch,
-                    backup,
+                    patch: serde_wasm_bindgen::to_value(&patch).expect(EXPECT),
+                    backup: serde_wasm_bindgen::to_value(&backup).expect(EXPECT),
                 }
             }
         }

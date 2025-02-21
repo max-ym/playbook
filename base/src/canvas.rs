@@ -716,6 +716,10 @@ impl Id {
             None
         }
     }
+
+    pub const fn is_valid(&self) -> bool {
+        self.id_kind().is_some()
+    }
 }
 
 /// The kind of the ID.

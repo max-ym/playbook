@@ -8,11 +8,10 @@ use smallvec::SmallVec;
 use thiserror::Error;
 use uuid::Uuid;
 
-use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    work_session::{self, wsr, wsw, CheckoutChangedStack},
+    work_session::{self, wsr, wsw, CheckoutChangedStack, WorkSessionProject},
     InvalidHandleError, MyUuid, PermissionError,
 };
 
@@ -22,10 +21,11 @@ pub use js_nodes::*;
 
 pub struct Project {
     name: JsString,
-    canvas: canvas::Canvas<JsonValue>,
+    canvas: canvas::Canvas<JsValue>,
     data: SmallVec<[table_data::Table; 1]>,
     files: SmallVec<[File; 1]>,
     uuid: Uuid,
+    meta: JsValue,
 }
 
 impl Project {
@@ -36,9 +36,11 @@ impl Project {
             data: SmallVec::new(),
             files: SmallVec::new(),
             uuid: Uuid::nil(),
+            meta: JsValue::NULL,
         }
     }
 
+    /// See [JsProject::get_name].
     pub fn name(&self) -> &JsString {
         &self.name
     }
@@ -47,6 +49,7 @@ impl Project {
         &self.data
     }
 
+    /// See [JsProject::get_files].
     pub fn files(&self) -> &[File] {
         &self.files
     }
@@ -70,15 +73,16 @@ impl Project {
         panic!("Failed to generate a unique UUID for the file");
     }
 
+    /// Project UUID.
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }
 
-    pub(crate) fn canvas(&self) -> &canvas::Canvas<JsonValue> {
+    pub(crate) fn canvas(&self) -> &canvas::Canvas<JsValue> {
         &self.canvas
     }
 
-    pub(crate) fn canvas_mut(&mut self) -> &mut canvas::Canvas<JsonValue> {
+    pub(crate) fn canvas_mut(&mut self) -> &mut canvas::Canvas<JsValue> {
         &mut self.canvas
     }
 }
@@ -128,7 +132,7 @@ impl JsProject {
         if let Some(project) = project {
             project.name().clone()
         } else {
-            error!("Project not found. Was removed from work session. Project handle is invalid.");
+            error!("{ProjectNotFoundError}");
             JsString::from("")
         }
     }
@@ -141,7 +145,7 @@ impl JsProject {
         if let Some(project) = project {
             project.name = name;
         } else {
-            error!("Project not found. Was removed from work session. Project handle is invalid.");
+            error!("{ProjectNotFoundError}");
         }
     }
 
@@ -153,7 +157,7 @@ impl JsProject {
     ///
     /// # Fake Server
     /// UUID 0 allows to load empty project as if it was loaded from the server.
-    pub fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
+    pub async fn load(identifier: JsString) -> Result<JsProject, ProjectLoadError> {
         let identifier = String::from(identifier);
         let uuid = Uuid::parse_str(&identifier).map_err(|_| ProjectLoadError::InvalidUuid)?;
 
@@ -182,13 +186,27 @@ impl JsProject {
     /// Get the metadata associated with the project by the client.
     #[wasm_bindgen(getter)]
     pub fn meta(&self) -> JsValue {
-        todo!()
+        let ws = wsr!();
+        let project = ws.project_by_id(self.uuid);
+        if let Some(project) = project {
+            project.meta.clone()
+        } else {
+            error!("{ProjectNotFoundError}");
+            JsValue::NULL
+        }
     }
 
     /// Set the metadata associated with the project by the client.
     #[wasm_bindgen(setter)]
     pub fn set_meta(&self, meta: JsValue) {
-        todo!()
+        todo!("Store in the worksession history as well");
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.uuid);
+        if let Some(project) = project {
+            project.meta = meta;
+        } else {
+            error!("{ProjectNotFoundError}");
+        }
     }
 }
 
@@ -217,29 +235,78 @@ pub struct JsCanvas {
     project_uuid: Uuid,
 }
 
+/// Error when the project is not found in the work session by the given identifier.
+/// This can happen if the handle to the project is invalid because the project was
+/// removed from the work session.
+#[derive(Debug, Error)]
+#[wasm_bindgen]
+#[error("Project not found. Was removed from work session. Project handle is invalid.")]
+pub struct ProjectNotFoundError;
+
+impl From<ProjectNotFoundError> for InvalidHandleError {
+    fn from(_: ProjectNotFoundError) -> Self {
+        InvalidHandleError
+    }
+}
+
+pub(crate) trait ProjectHandle {
+    fn project_uuid(&self) -> Uuid;
+
+    /// Check the validity of the handle and then proceed with the given function.
+    /// If the project is not found, this will return an [ProjectNotFoundError].
+    #[track_caller]
+    fn checked_write<T>(
+        &self,
+        f: impl FnOnce(&mut WorkSessionProject) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        let mut ws = wsw!();
+        let project = ws.project_by_id_mut(self.project_uuid());
+        if let Some(project) = project {
+            f(project)
+        } else {
+            let err = ProjectNotFoundError;
+            error!("{err}");
+            Err(err.into())
+        }
+    }
+
+    /// Check the validity of the handle and then proceed with the given function.
+    /// If the project is not found, this will return an [ProjectNotFoundError].
+    #[track_caller]
+    fn checked_read<T>(
+        &self,
+        f: impl FnOnce(&WorkSessionProject) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        let ws = wsr!();
+        let project = ws.project_by_id(self.project_uuid());
+        if let Some(project) = project {
+            f(project)
+        } else {
+            let err = ProjectNotFoundError;
+            error!("{err}");
+            Err(err.into())
+        }
+    }
+}
+
+impl ProjectHandle for JsCanvas {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+}
+
 #[wasm_bindgen(js_class = Canvas)]
 impl JsCanvas {
     /// Add a new node to the canvas.
     #[wasm_bindgen(js_name = addNode)]
     pub fn add_node(&mut self, stub: JsNodeStub, meta: JsValue) -> Result<JsNode, JsError> {
-        let mut ws = wsw!();
-        let project = ws.project_by_id_mut(self.project_uuid);
-        if let Some(project) = project {
-            let node_id = project.add_node(
-                stub.stub,
-                serde_wasm_bindgen::from_value(meta).map_err(|e| {
-                    error!("Failed to deserialize meta data for the node. {:?}", e);
-                    JsError::new("Failed to deserialize meta data for the node")
-                })?,
-            );
+        self.checked_write(|project| {
+            let node_id = project.add_node(stub.stub, meta);
             Ok(JsNode {
                 project_uuid: self.project_uuid,
                 node_id,
             })
-        } else {
-            error!("Project not found. Was removed from work session. Project handle is invalid.");
-            Err(InvalidHandleError.into())
-        }
+        })
     }
 
     /// Add a new edge between two pins.
@@ -247,9 +314,7 @@ impl JsCanvas {
     pub fn add_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
         use canvas::{Edge, InputPin, OutputPin, Pin};
 
-        let mut ws = wsw!();
-        let project = ws.project_by_id_mut(self.project_uuid);
-        if let Some(project) = project {
+        self.checked_write(|project| {
             let from = OutputPin(Pin {
                 node_id: from.node_id,
                 order: from.ordinal,
@@ -260,10 +325,7 @@ impl JsCanvas {
             });
             project.add_edge(Edge { from, to })?;
             Ok(())
-        } else {
-            error!("Project not found. Was removed from work session. Project handle is invalid.");
-            Err(InvalidHandleError.into())
-        }
+        })
     }
 
     /// Remove an edge between two pins.
@@ -271,9 +333,7 @@ impl JsCanvas {
     pub fn remove_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
         use canvas::{Edge, InputPin, OutputPin, Pin};
 
-        let mut ws = wsw!();
-        let project = ws.project_by_id_mut(self.project_uuid);
-        if let Some(project) = project {
+        self.checked_write(|project| {
             let from = OutputPin(Pin {
                 node_id: from.node_id,
                 order: from.ordinal,
@@ -284,10 +344,7 @@ impl JsCanvas {
             });
             project.remove_edge(Edge { from, to })?;
             Ok(())
-        } else {
-            error!("Project not found. Was removed from work session. Project handle is invalid.");
-            Err(InvalidHandleError.into())
-        }
+        })
     }
 
     /// Get iterator over nodes in this canvas.
@@ -300,15 +357,12 @@ impl JsCanvas {
     /// should not have this iterator around while modifying the canvas.
     #[wasm_bindgen(js_name = nodeIterator)]
     pub fn node_iter(&self) -> Result<JsNodeIter, JsError> {
-        let ws = wsr!();
-        let project = ws
-            .project_by_id(self.project_uuid)
-            .ok_or(InvalidHandleError)?;
-
-        Ok(JsNodeIter {
-            detect_change: project.detect_changed_stack(),
-            project_uuid: self.project_uuid,
-            pos: 0,
+        self.checked_read(|project| {
+            Ok(JsNodeIter {
+                stack_checkout: project.stack_checkout(),
+                project_uuid: self.project_uuid,
+                pos: 0,
+            })
         })
     }
 }
@@ -321,6 +375,36 @@ pub struct JsNode {
     node_id: canvas::Id,
 }
 
+impl ProjectHandle for JsNode {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+}
+
+pub(crate) trait NodeHandle: ProjectHandle {
+    fn node_id(&self) -> canvas::Id;
+
+    /// Check the validity of the node handle and then proceed with the given function.
+    /// If the project is not found, this will return an [ProjectNotFoundError].
+    /// If the node is not found, this will return an [InvalidHandleError].
+    fn checked_node_read<T>(
+        &self,
+        f: impl FnOnce(&canvas::Node<JsValue>) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        let node_id = self.node_id();
+        self.checked_read(|project| {
+            let node = project.canvas().node(node_id).ok_or(InvalidHandleError)?;
+            f(node)
+        })
+    }
+}
+
+impl NodeHandle for JsNode {
+    fn node_id(&self) -> canvas::Id {
+        self.node_id
+    }
+}
+
 #[wasm_bindgen(js_class = Node)]
 impl JsNode {
     /// Get the stub that will allow to create a new node with the same configuration.
@@ -329,53 +413,39 @@ impl JsNode {
     /// If the project or the node is no longer valid, this will return an error.
     #[wasm_bindgen(getter, js_name = stub)]
     pub fn stub(&self) -> Result<JsNodeStub, JsError> {
-        let ws = wsr!();
-        let maybe_project = ws.project_by_id(self.project_uuid);
-        if let Some(project) = maybe_project {
-            if let Some(node) = project.canvas().node(self.node_id) {
-                Ok(node.stub.clone().into())
-            } else {
-                Err(InvalidHandleError.into())
-            }
-        } else {
-            Err(InvalidHandleError.into())
-        }
+        self.checked_node_read(|node| Ok(node.stub.clone().into()))
     }
 
     /// Get the output pin at the given position.
     #[wasm_bindgen(js_name = outAt)]
     pub fn out_at(&self, position: u32) -> Result<JsNodePin, JsError> {
-        let ws = wsr!();
-        let project = ws
-            .project_by_id(self.project_uuid)
-            .ok_or(InvalidHandleError)?;
-        let node = project
-            .canvas()
-            .node(self.node_id)
-            .ok_or(InvalidHandleError)?;
-        if let Some(ordinal) = node.stub.real_output_pin_idx(position as _) {
-            Ok(JsNodePin {
-                project_uuid: self.project_uuid,
-                node_id: self.node_id,
-                ordinal: ordinal as _,
-            })
-        } else {
-            error!("Output pin not found at position {position}");
-            Err(PinNotFoundError.into())
-        }
+        self.checked_node_read(|node| {
+            if let Some(ordinal) = node.stub.real_output_pin_idx(position as _) {
+                Ok(JsNodePin {
+                    project_uuid: self.project_uuid,
+                    node_id: self.node_id,
+                    ordinal: ordinal as _,
+                })
+            } else {
+                error!("Output pin not found at position {position}");
+                Err(PinNotFoundError.into())
+            }
+        })
     }
 
     /// Get the input pin at the given position.
     #[wasm_bindgen(js_name = inAt)]
-    pub fn in_at(&self, position: u32) -> Option<JsNodePin> {
-        let ws = wsr!();
-        let project = ws.project_by_id(self.project_uuid)?;
-        let node = project.canvas().node(self.node_id)?;
-        let ordinal = node.stub.real_input_pin_idx(position as _)?;
-        Some(JsNodePin {
-            project_uuid: self.project_uuid,
-            node_id: self.node_id,
-            ordinal,
+    pub fn in_at(&self, position: u32) -> Result<JsNodePin, JsError> {
+        self.checked_node_read(|node| {
+            let ordinal = node
+                .stub
+                .real_input_pin_idx(position as _)
+                .ok_or(PinNotFoundError)?;
+            Ok(JsNodePin {
+                project_uuid: self.project_uuid,
+                node_id: self.node_id,
+                ordinal,
+            })
         })
     }
 
@@ -392,16 +462,10 @@ impl JsNode {
     /// This also returns the stub of the node, so you can recreate it later.
     pub fn drop(self) -> Result<JsNodeStub, JsError> {
         let stub = self.stub()?;
-
-        let mut ws = wsw!();
-        let project = ws.project_by_id_mut(self.project_uuid);
-        if let Some(project) = project {
+        self.checked_write(|project| {
             project.remove_node(self.node_id)?;
             Ok(stub)
-        } else {
-            error!("Project not found. Was removed from work session. Project handle is invalid.");
-            Err(InvalidHandleError.into())
-        }
+        })
     }
 }
 
@@ -410,10 +474,28 @@ impl JsNode {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = NodeIter)]
 pub struct JsNodeIter {
-    detect_change: CheckoutChangedStack,
+    stack_checkout: CheckoutChangedStack,
 
     project_uuid: Uuid,
     pos: usize,
+}
+
+impl ProjectHandle for JsNodeIter {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+}
+
+impl NodeHandle for JsNodeIter {
+    fn node_id(&self) -> canvas::Id {
+        self.checked_read(|p| {
+            p.canvas()
+                .node_by_idx(self.pos as _)
+                .ok_or(JsError::new("Node not found"))
+                .map(|v| v.id)
+        })
+        .unwrap_or(canvas::Id::MAX)
+    }
 }
 
 #[wasm_bindgen(js_class = NodeIter)]
@@ -426,24 +508,22 @@ impl JsNodeIter {
             return None;
         }
 
-        let ws = wsr!();
-        let project = ws.project_by_id(self.project_uuid)?;
-        let node = project.canvas().node_by_idx(self.pos as _)?;
+        let node_id = self.node_id();
+        if !node_id.is_valid() {
+            return None;
+        }
+
         self.pos += 1;
         Some(JsNode {
             project_uuid: self.project_uuid,
-            node_id: node.id,
+            node_id,
         })
     }
 
     #[wasm_bindgen(getter, js_name = isValid)]
     pub fn is_valid(&self) -> bool {
-        let ws = wsr!();
-        if let Some(p) = ws.project_by_id(self.project_uuid) {
-            p.detect_changed_stack() == self.detect_change
-        } else {
-            false
-        }
+        self.checked_read(|p| Ok(p.stack_checkout() == self.stack_checkout))
+            .unwrap_or(false)
     }
 }
 
@@ -456,35 +536,48 @@ pub struct JsNodePin {
     ordinal: canvas::PinOrder,
 }
 
+impl ProjectHandle for JsNodePin {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+}
+
+impl NodeHandle for JsNodePin {
+    fn node_id(&self) -> canvas::Id {
+        self.node_id
+    }
+}
+
 #[wasm_bindgen(js_class = NodePin)]
 impl JsNodePin {
     /// Get the data type of the pin.
     /// If the pin has unknown data type, this will return `undefined`.
     #[wasm_bindgen(getter, js_name = dataType)]
-    pub fn data_type(&self) -> Option<JsDataType> {
-        let ws = wsr!();
-        let project = ws.project_by_id(self.project_uuid)?;
-        let ty = project.pin_data_type(canvas::Pin {
-            node_id: self.node_id,
-            order: self.ordinal,
-        })?;
-        Some(ty.to_owned().into())
+    pub fn data_type(&self) -> Result<Option<JsDataType>, JsError> {
+        self.checked_read(|project| {
+            let ty = project
+                .pin_data_type(canvas::Pin {
+                    node_id: self.node_id,
+                    order: self.ordinal,
+                })
+                .map(|v| v.to_owned().into());
+            Ok(ty)
+        })
     }
 
     /// Whether the pin is an output pin (`true`). If it is an input pin, this returns `false`.
     #[wasm_bindgen(getter, js_name = isOutput)]
-    pub fn is_output(&self) -> Option<bool> {
-        let ws = wsr!();
-        let project = ws.project_by_id(self.project_uuid)?;
-        let node = project.canvas().node(self.node_id)?;
-        if node.stub.is_valid_input_ordinal(self.ordinal) {
-            Some(false)
-        } else if node.stub.is_valid_output_ordinal(self.ordinal) {
-            Some(true)
-        } else {
-            error!("Pin ordinal is invalid. Cannot determine if it is input or output.");
-            None
-        }
+    pub fn is_output(&self) -> Result<bool, JsError> {
+        self.checked_node_read(|node| {
+            if node.stub.is_valid_input_ordinal(self.ordinal) {
+                Ok(false)
+            } else if node.stub.is_valid_output_ordinal(self.ordinal) {
+                Ok(true)
+            } else {
+                error!("Pin ordinal is invalid. Cannot determine if it is input or output.");
+                Err(PinNotFoundError.into())
+            }
+        })
     }
 
     /// Get the position of the pin on the node.
@@ -493,23 +586,15 @@ impl JsNodePin {
     /// This uniquely identifies input and output pins separately.
     #[wasm_bindgen(getter)]
     pub fn ordinal(&self) -> Result<canvas::PinOrder, JsError> {
-        let is_output = self.is_output().ok_or(InvalidHandleError)?;
-
-        let ws = wsr!();
-        let project = ws
-            .project_by_id(self.project_uuid)
-            .ok_or(InvalidHandleError)?;
-        let node = project
-            .canvas()
-            .node(self.node_id)
-            .ok_or(InvalidHandleError)?;
-
-        if is_output {
-            node.stub.real_output_pin_idx(self.ordinal)
-        } else {
-            node.stub.real_input_pin_idx(self.ordinal)
-        }
-        .ok_or(PinNotFoundError.into())
+        let is_output = self.is_output()?;
+        self.checked_node_read(|node| {
+            if is_output {
+                node.stub.real_output_pin_idx(self.ordinal)
+            } else {
+                node.stub.real_input_pin_idx(self.ordinal)
+            }
+            .ok_or(PinNotFoundError.into())
+        })
     }
 
     /// Peek into the data that this pin receiver or transmits.
@@ -612,7 +697,10 @@ impl JsDataInstance {
         self.value.type_of().into()
     }
 
-    /// Get the value as a JS value.
+    /// Get the value converted as a JS value.
+    /// Note this conversion is lossy, e.g. monetary values are converted
+    /// into floating point number in JavaScript, but in fact it is stored
+    /// as a decimal in the canvas (hence is lossless).
     #[wasm_bindgen(getter)]
     pub fn value(&self) -> JsValue {
         use bigdecimal::ToPrimitive;
@@ -697,6 +785,7 @@ impl JsDataInstance {
     }
 }
 
+/// Time representation for JS.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Time)]
 pub struct JsTime {
@@ -705,12 +794,14 @@ pub struct JsTime {
     pub second: i8,
 }
 
+/// Monetary approximation for JavaScript.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Monetary)]
 pub struct JsMonetary {
     pub amount: f64,
 }
 
+/// Ordering representation for JS.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Ordering)]
 pub enum JsOrdering {
@@ -719,29 +810,37 @@ pub enum JsOrdering {
     Greater,
 }
 
+/// Result representation for JS.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Result)]
 pub struct JsResult {
+    /// The value of the result (either Ok or Err).
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub value: JsDataInstance,
 
+    /// Whether the result is Ok.
     #[wasm_bindgen(readonly, js_name = isOk)]
     pub is_ok: bool,
 }
 
+/// Option representation for JS.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Option)]
 pub struct JsOption {
+    /// The value of the option, if it is Some.
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub value: Option<JsDataInstance>,
 }
 
+/// Predicate representation for JS.
 #[derive(Debug)]
 #[wasm_bindgen(js_name = Predicate)]
 pub struct JsPredicate {
+    /// Listed input pin types for the predicate.
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub inputs: Vec<JsDataType>,
 
+    /// Listed output pin types for the predicate.
     #[wasm_bindgen(readonly, getter_with_clone)]
     pub outputs: Vec<JsDataType>,
 }
@@ -756,10 +855,8 @@ pub struct JsPeekFlow {
 #[wasm_bindgen(js_class = PeekFlow)]
 impl JsPeekFlow {
     /// Get the data type of the values in this flow.
-    /// If the data type is nested, this will return an array of data types, where
-    /// the first element is the outermost data type.
     #[wasm_bindgen(js_name = dataType)]
-    pub fn data_type(&self) -> Vec<JsDataType> {
+    pub fn data_type(&self) -> JsDataTypePeek {
         todo!()
     }
 
@@ -775,6 +872,82 @@ impl JsPeekFlow {
     #[wasm_bindgen(js_name = shuffled)]
     pub fn shuffled(&self, limit: usize) -> Vec<JsFlowValue> {
         todo!()
+    }
+}
+
+/// Peek into the data type. This allows to see the nested data types.
+#[derive(Debug)]
+#[wasm_bindgen(js_name = DataTypePeek)]
+pub struct JsDataTypePeek {
+    inner: JsDataType,
+}
+
+#[wasm_bindgen(js_class = DataTypePeek)]
+impl JsDataTypePeek {
+    /// Get the kind of the data type.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> JsDataTypeKind {
+        self.inner.kind()
+    }
+
+    /// Get the inner data type if this is a nested data type.
+    /// Positional argument is the position in the nested data type.
+    ///
+    /// # Examples
+    /// `Result<Result<T1, E1>, Result<T2, E2>>`:
+    /// - `inner(0)` returns peek for `Result`.
+    /// - `inner(1)` returns `undefined`.
+    /// - `inner(0).inner(0)` returns peek for `Result`.
+    /// - `inner(0).inner(1)` returns peek for `Result`.
+    /// - `inner(0).inner(2)` returns `undefined`.
+    /// - `inner(0).inner(0).inner(0)` returns peek for `T1`.
+    /// - `inner(0).inner(0).inner(1)` returns peek for `E1`.
+    /// - `inner(0).inner(1).inner(0)` returns peek for `T2`.
+    /// - `inner(0).inner(1).inner(1)` returns peek for `E2`.
+    /// - `inner(0).inner(1).inner(2)` returns `undefined`.
+    #[wasm_bindgen()]
+    pub fn inner(&self, pos: usize) -> Option<JsDataTypePeek> {
+        use canvas::PrimitiveType as PT;
+        let repr = match &self.inner.repr {
+            PT::Int => return None,
+            PT::Uint => return None,
+            PT::Unit => return None,
+            PT::Moneraty => return None,
+            PT::Date => return None,
+            PT::DateTime => return None,
+            PT::Time => return None,
+            PT::Bool => return None,
+            PT::Str => return None,
+            PT::Ordering => return None,
+            PT::File => return None,
+            PT::Record => return None,
+            PT::Array(primitive_type) => {
+                if pos == 0 {
+                    (**primitive_type).to_owned()
+                } else {
+                    return None;
+                }
+            }
+            PT::Result(boxed) => {
+                if pos == 0 {
+                    (**boxed).0.to_owned()
+                } else if pos == 1 {
+                    (**boxed).1.to_owned()
+                } else {
+                    return None;
+                }
+            }
+            PT::Option(primitive_type) => {
+                if pos == 0 {
+                    (**primitive_type).to_owned()
+                } else {
+                    return None;
+                }
+            }
+        };
+        Some(JsDataTypePeek {
+            inner: JsDataType { repr },
+        })
     }
 }
 
@@ -805,6 +978,8 @@ impl JsFlowValue {
     }
 }
 
+/// See [JsProjectFile] for more information.
+#[derive(Debug)]
 pub struct File {
     name: JsString,
 
@@ -932,6 +1107,7 @@ pub enum FileLoadError {
     RequestError,
 }
 
+/// See [JsProtect] for more information.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Protect {
     read: ProtectLevel,

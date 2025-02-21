@@ -2,6 +2,12 @@
 //! a bridge between Rust implementation of validation logic and the frontend
 //! implementation of the UI.
 //! 
+//! # Naming
+//! All JS-related structures have "Js" prefix to avoid name conflicts with
+//! Rust structures. For example, [JsProject](project::JsProject) is a JS-side
+//! handle for a [Project](project::Project) structure. The JS-side handle
+//! is visible from the JS side as `Project` though.
+//! 
 //! # Fake Server
 //! The fake server mode will be applied if WASM package is compiled with corresponding
 //! feature enabled.
