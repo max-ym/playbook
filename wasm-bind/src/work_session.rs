@@ -8,7 +8,7 @@ use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
-use crate::project::Project;
+use crate::project::{Metadata, Project};
 use crate::*;
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
@@ -183,12 +183,7 @@ impl WorkSessionProject {
         }
         trace!("undoing change");
 
-        self.require_revalidate();
-
-        self.changes.pos -= 1;
-        let change = self.changes.stack[self.changes.pos].op.clone();
-        change.revert(self);
-        Some(self.changes.pos)
+        todo!()
     }
 
     /// Redo the last undone change.
@@ -201,12 +196,7 @@ impl WorkSessionProject {
         }
         trace!("redoing change");
 
-        self.require_revalidate();
-
-        let change = self.changes.stack[self.changes.pos].op.clone();
-        change.apply(self);
-        self.changes.pos += 1;
-        Some(self.changes.pos)
+        todo!()
     }
 
     /// Go to a specific change.
@@ -259,98 +249,43 @@ impl WorkSessionProject {
         }
     }
 
-    /// Record given change operation to the project history.
-    fn record(&mut self, op: ChangeOp) {
-        trace!("record change operation to the project history: {op:#?}");
-        self.changes.stack.truncate(self.changes.pos);
-        self.changes.stack.push(ChangeItem {
-            timestamp: std::time::SystemTime::now(),
-            op,
-            meta: JsValue::NULL,
-        });
-        self.changes.pos += 1;
-    }
-
     /// Mark the project as requiring revalidation.
     fn require_revalidate(&mut self) {
         trace!("project requires revalidation");
         self.revalidate = true;
     }
 
-    pub fn add_node(&mut self, stub: canvas::NodeStub, meta: JsValue) -> canvas::Id {
-        trace!("add node to the project: {stub:#?}, {meta:#?}");
-        self.require_revalidate();
-        let id = self
-            .project
-            .canvas_mut()
-            .add_node(stub.clone(), meta.clone());
-        self.record(ChangeOp::AddNode {
-            stub: Box::new(stub),
-            meta,
-            id,
-        });
-        id
+    pub fn add_node(&mut self, stub: canvas::NodeStub) -> canvas::Id {
+        trace!("add node to the project: {stub:#?}");
+
+        todo!()
     }
 
     pub fn remove_node(&mut self, id: canvas::Id) -> Result<(), NodeNotFoundError> {
         trace!("remove node {id} from the project");
-        let (node, removed_edges) = self.project.canvas_mut().remove_node(id)?;
-        self.require_revalidate();
-        self.record(ChangeOp::RemoveNode {
-            removed_edges,
-            stub: Box::new(node.stub),
-            meta: node.meta,
-            id,
-        });
-        Ok(())
+
+        todo!()
     }
 
     pub fn add_edge(&mut self, edge: canvas::Edge) -> Result<(), NodeNotFoundError> {
         trace!("add edge {edge} to the project");
-        self.require_revalidate();
-        self.project.canvas_mut().add_edge(edge)?;
-        self.record(ChangeOp::AddEdge { edge });
-        Ok(())
+
+        todo!()
     }
 
     pub fn remove_edge(&mut self, edge: canvas::Edge) -> Result<(), EdgeNotFoundError> {
         trace!("remove edge {edge} from the project");
-        self.project.canvas_mut().remove_edge(edge)?;
-        self.require_revalidate();
-        self.record(ChangeOp::RemoveEdge { edge });
-        Ok(())
+
+        todo!()
     }
 
     pub fn patch_node_meta(
         &mut self,
         node_id: canvas::Id,
-        patch: JsValue,
+        key: JsString,
+        new: JsValue,
     ) -> Result<(), NodeNotFoundError> {
-        // TODO rework, as it looks like we overcomplicated this. Do we even need to store
-        // "patch"? Maybe let this to be computed on JS side?
-        let rust_patch: serde_json::Value =
-            serde_wasm_bindgen::from_value(patch.clone()).expect("object should be deserializable");
-        trace!("patch metadata of node {node_id} in the project: {rust_patch:#?}");
-        let backup = {
-            let node = self
-                .project
-                .canvas_mut()
-                .node_mut(node_id)
-                .ok_or(NodeNotFoundError(node_id))?;
-            let backup = node.meta.clone();
-            let mut rust_meta = serde_wasm_bindgen::from_value(backup.clone())
-                .expect("object should be serializable");
-            json_patch::merge(&mut rust_meta, &rust_patch);
-            node.meta =
-                serde_wasm_bindgen::to_value(&rust_meta).expect("object should be serializable");
-            backup
-        };
-        self.record(ChangeOp::AlterNodeMetadata {
-            node_id,
-            patch,
-            backup,
-        });
-        Ok(())
+        todo!()
     }
 
     /// Get the known data type of the pin. [None] if the pin type is not known.
@@ -645,9 +580,15 @@ pub struct CheckoutChangedStack {
     time: std::time::SystemTime,
 }
 
+/// Change item in the history stack of changes. This has one or more operations
+/// associated with it, that can be applied to or reverted in the project.
 pub struct ChangeItem {
+    /// Timestamp of the last change in [Self::op] array.
     timestamp: std::time::SystemTime,
-    op: ChangeOp,
+
+    /// Array of operations that describes this change.
+    /// At least one operation is always present.
+    op: SmallVec<[ChangeOp; 1]>,
 
     /// Metadata associated with the change. This allows to
     /// manage the lifecycle of the value with the history item
@@ -665,15 +606,51 @@ impl ChangeItem {
     }
 }
 
-/// Change operation that can be performed on the project. This
-/// information is enough to reflect the change in the UI.
-/// This allows as well to revert the existing change.
+/// Builder for the change item. This merges multiple change operations into a single
+/// change operation where applicable. E.g. if node metadata is repeatedly changed,
+/// this will merge all these changes into a single change operation.
+pub struct ChangeItemBuilder {
+    timestamp: std::time::SystemTime,
+    linear: SmallVec<[ChangeOp; 1]>,
+    node_meta: Metadata,
+    project_meta: Metadata,
+}
+
+/// Change operation stub, that can be used to execute actual change operation,
+/// which than will record all necessary information to the history stack.
+#[derive(Debug, Clone)]
+pub enum ChangeOpStub {
+    AddNode {
+        stub: Box<canvas::NodeStub>,
+    },
+    RemoveNode {
+        id: canvas::Id,
+    },
+    AddEdge {
+        edge: canvas::Edge,
+    },
+    RemoveEdge {
+        edge: canvas::Edge,
+    },
+    AlterNodeMetadata {
+        node_id: canvas::Id,
+        key: JsString,
+        new: JsValue,
+    },
+    AlterProjectMetadata {
+        key: JsString,
+        new: JsValue,
+    },
+}
+
+/// Single change operation that was performed on the project.
+/// This record allows to revert the existing change.
+/// This is the smallest unit of action recordable in [ChangeItem].
 #[derive(Debug, Clone)]
 pub enum ChangeOp {
     /// Add a node to the canvas.
     AddNode {
         stub: Box<canvas::NodeStub>,
-        meta: JsValue,
         id: canvas::Id,
     },
 
@@ -681,7 +658,7 @@ pub enum ChangeOp {
     RemoveNode {
         removed_edges: Vec<canvas::Edge>,
         stub: Box<canvas::NodeStub>,
-        meta: JsValue,
+        meta: Metadata,
         id: canvas::Id,
     },
 
@@ -696,13 +673,25 @@ pub enum ChangeOp {
         /// Node in which the metadata was changed.
         node_id: canvas::Id,
 
-        /// Values to (re)set in the metadata, as a JSON map.
-        ///
-        /// For edits, the value is the new value instead of the existing one.
-        /// All null values in a map are removed from the metadata.
-        patch: JsValue,
+        /// A key to the metadata that was changed.
+        key: JsString,
 
-        /// Pre-patch values to revert the metadata back to the original state.
+        /// New value assigned.
+        new: JsValue,
+
+        /// Backup of the previous metadata value.
+        backup: JsValue,
+    },
+
+    /// Alter metadata of the project.
+    AlterProjectMetadata {
+        /// A key to the metadata that was changed.
+        key: JsString,
+
+        /// New value assigned.
+        new: JsValue,
+
+        /// Backup of the previous metadata value.
         backup: JsValue,
     },
 }
@@ -716,47 +705,36 @@ impl ChangeOp {
     /// This method panics if the operation cannot be applied, which cannot
     /// happen if the operation was recorded correctly and when all changes are
     /// tracked correctly.
-    fn apply(self, project: &mut WorkSessionProject) -> ChangeOp {
+    fn apply(change_op_stub: ChangeOpStub, project: &mut WorkSessionProject) -> ChangeOp {
         use ChangeOp::*;
+        use ChangeOpStub as S;
 
         const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
         const EXPECT_FOUND_EDGE: &str = "edge not found, though operation was recorded";
 
-        match self {
-            AddNode { stub, id: _, meta } => {
+        match change_op_stub {
+            S::AddNode { stub } => {
                 let new_id = project
                     .project
                     .canvas_mut()
-                    .add_node(stub.as_ref().clone(), meta.clone());
-                AddNode {
-                    stub,
-                    meta,
-                    id: new_id,
-                }
+                    .add_node(stub.as_ref().clone(), Default::default());
+                AddNode { stub, id: new_id }
             }
-            RemoveNode {
-                removed_edges: _,
-                meta: _,
-                mut stub,
-                id,
-            } => {
+            S::RemoveNode { id } => {
                 let (node, removed_edges) = project
                     .project
                     .canvas_mut()
                     .remove_node(id)
                     .expect(EXPECT_FOUND_NODE);
 
-                // Reuse existing "Box", but we don't care about that dummy input stub.
-                *stub = node.stub;
-
                 RemoveNode {
                     removed_edges,
-                    stub,
+                    stub: Box::new(node.stub),
                     meta: node.meta,
                     id,
                 }
             }
-            AddEdge { edge } => {
+            S::AddEdge { edge } => {
                 project
                     .project
                     .canvas_mut()
@@ -764,7 +742,7 @@ impl ChangeOp {
                     .expect(EXPECT_FOUND_EDGE);
                 AddEdge { edge }
             }
-            RemoveEdge { edge } => {
+            S::RemoveEdge { edge } => {
                 project
                     .project
                     .canvas_mut()
@@ -772,31 +750,31 @@ impl ChangeOp {
                     .expect(EXPECT_FOUND_EDGE);
                 RemoveEdge { edge }
             }
-            AlterNodeMetadata {
-                node_id,
-                patch,
-                backup: _,
-            } => {
-                const EXPECT: &str = "object should be deserializable";
-                let patch = serde_wasm_bindgen::from_value(patch).expect(EXPECT);
-
+            S::AlterNodeMetadata { node_id, key, new } => {
                 let meta = &mut project
                     .project
                     .canvas_mut()
                     .node_mut(node_id)
                     .expect(EXPECT_FOUND_NODE)
                     .meta;
-                let mut meta: serde_json::Value =
-                    serde_wasm_bindgen::from_value(meta.clone()).expect(EXPECT);
-                let backup = meta.clone();
-
-                json_patch::merge(&mut meta, &patch);
+                let backup = meta
+                    .insert(key.clone().into(), new.clone())
+                    .unwrap_or(JsValue::UNDEFINED);
 
                 AlterNodeMetadata {
                     node_id,
-                    patch: serde_wasm_bindgen::to_value(&patch).expect(EXPECT),
-                    backup: serde_wasm_bindgen::to_value(&backup).expect(EXPECT),
+                    key,
+                    new,
+                    backup,
                 }
+            }
+            S::AlterProjectMetadata { key, new } => {
+                let meta = &mut project.project.meta;
+                let backup = meta
+                    .insert(key.clone().into(), new.clone())
+                    .unwrap_or(JsValue::UNDEFINED);
+
+                AlterProjectMetadata { key, new, backup }
             }
         }
     }
@@ -849,7 +827,8 @@ impl ChangeOp {
             }
             AlterNodeMetadata {
                 node_id,
-                patch: _,
+                key,
+                new: _,
                 backup,
             } => {
                 let meta = &mut project
@@ -858,7 +837,11 @@ impl ChangeOp {
                     .node_mut(node_id)
                     .expect(EXPECT_FOUND_NODE)
                     .meta;
-                *meta = backup;
+                meta.insert(key.into(), backup);
+            }
+            AlterProjectMetadata { key, new: _, backup } => {
+                let meta = &mut project.project.meta;
+                meta.insert(key.into(), backup);
             }
         }
     }

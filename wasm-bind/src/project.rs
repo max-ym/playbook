@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+};
 
 use base::{canvas, table_data};
 use chrono::Datelike;
@@ -21,11 +24,11 @@ pub use js_nodes::*;
 
 pub struct Project {
     name: JsString,
-    canvas: canvas::Canvas<JsValue>,
+    canvas: canvas::Canvas<Metadata>,
     data: SmallVec<[table_data::Table; 1]>,
     files: SmallVec<[File; 1]>,
     uuid: Uuid,
-    meta: JsValue,
+    pub(crate) meta: Metadata,
 }
 
 impl Project {
@@ -36,7 +39,7 @@ impl Project {
             data: SmallVec::new(),
             files: SmallVec::new(),
             uuid: Uuid::nil(),
-            meta: JsValue::NULL,
+            meta: Metadata::default(),
         }
     }
 
@@ -78,11 +81,11 @@ impl Project {
         self.uuid
     }
 
-    pub(crate) fn canvas(&self) -> &canvas::Canvas<JsValue> {
+    pub(crate) fn canvas(&self) -> &canvas::Canvas<Metadata> {
         &self.canvas
     }
 
-    pub(crate) fn canvas_mut(&mut self) -> &mut canvas::Canvas<JsValue> {
+    pub(crate) fn canvas_mut(&mut self) -> &mut canvas::Canvas<Metadata> {
         &mut self.canvas
     }
 }
@@ -185,28 +188,8 @@ impl JsProject {
 
     /// Get the metadata associated with the project by the client.
     #[wasm_bindgen(getter)]
-    pub fn meta(&self) -> JsValue {
-        let ws = wsr!();
-        let project = ws.project_by_id(self.uuid);
-        if let Some(project) = project {
-            project.meta.clone()
-        } else {
-            error!("{ProjectNotFoundError}");
-            JsValue::NULL
-        }
-    }
-
-    /// Set the metadata associated with the project by the client.
-    #[wasm_bindgen(setter)]
-    pub fn set_meta(&self, meta: JsValue) {
-        todo!("Store in the worksession history as well");
-        let mut ws = wsw!();
-        let project = ws.project_by_id_mut(self.uuid);
-        if let Some(project) = project {
-            project.meta = meta;
-        } else {
-            error!("{ProjectNotFoundError}");
-        }
+    pub fn meta(&self) -> JsProjectMeta {
+        todo!()
     }
 }
 
@@ -299,9 +282,9 @@ impl ProjectHandle for JsCanvas {
 impl JsCanvas {
     /// Add a new node to the canvas.
     #[wasm_bindgen(js_name = addNode)]
-    pub fn add_node(&mut self, stub: JsNodeStub, meta: JsValue) -> Result<JsNode, JsError> {
+    pub fn add_node(&mut self, stub: JsNodeStub) -> Result<JsNode, JsError> {
         self.checked_write(|project| {
-            let node_id = project.add_node(stub.stub, meta);
+            let node_id = project.add_node(stub.stub);
             Ok(JsNode {
                 project_uuid: self.project_uuid,
                 node_id,
@@ -389,12 +372,30 @@ pub(crate) trait NodeHandle: ProjectHandle {
     /// If the node is not found, this will return an [InvalidHandleError].
     fn checked_node_read<T>(
         &self,
-        f: impl FnOnce(&canvas::Node<JsValue>) -> Result<T, JsError>,
+        f: impl FnOnce(&canvas::Node<Metadata>) -> Result<T, JsError>,
     ) -> Result<T, JsError> {
         let node_id = self.node_id();
         self.checked_read(|project| {
             let node = project.canvas().node(node_id).ok_or(InvalidHandleError)?;
             f(node)
+        })
+    }
+
+    /// Check the validity of the node handle, ensuring node and project exist,
+    /// and then proceed with the given function.
+    /// If the project is not found, this will return an [ProjectNotFoundError].
+    /// If the node is not found, this will return an [InvalidHandleError].
+    fn ensure_node_write<T>(
+        &self,
+        f: impl FnOnce(&mut WorkSessionProject) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        let node_id = self.node_id();
+        self.checked_write(|project| {
+            project
+                .canvas_mut()
+                .node(node_id)
+                .ok_or(InvalidHandleError)?;
+            f(project)
         })
     }
 }
@@ -466,6 +467,23 @@ impl JsNode {
             project.remove_node(self.node_id)?;
             Ok(stub)
         })
+    }
+
+    /// Associate new metadata with the node.
+    /// Metadata should be represented by a JSON-deserializable object.
+    /// Otherwise this will throw an error.
+    #[wasm_bindgen(setter, js_name = meta)]
+    pub fn set_meta(&self, key: JsString, meta: JsValue) -> Result<(), JsError> {
+        self.ensure_node_write(|project| {
+            project.patch_node_meta(self.node_id, key.into(), meta)?;
+            Ok(())
+        })
+    }
+
+    /// Get the metadata associated with the node by the client.
+    #[wasm_bindgen(getter)]
+    pub fn meta(&self) -> JsValue {
+        todo!()
     }
 }
 
@@ -615,6 +633,187 @@ impl JsNodePin {
 #[wasm_bindgen]
 #[error("described pin cannot be found in the node")]
 pub struct PinNotFoundError;
+
+/// Internal struct representing metadata. This metadata can be assigned to nodes, projects,
+/// history items etc...
+///
+/// # Implementation Note
+/// We split this into key-value structure as to allow updating little pieces
+/// of metadata. Otherwise, we would had to update the whole metadata object,
+/// which can be big and hence operation would be inefficient.
+#[derive(Debug, Default, Clone)]
+pub struct Metadata {
+    map: HashMap<HashJsString, JsValue>,
+}
+
+/// Hashable version of the JavaScript string for Rust.
+/// This is used as a key in the metadata map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashJsString(JsString);
+
+impl std::hash::Hash for HashJsString {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for code in self.0.iter() {
+            code.hash(state);
+        }
+    }
+}
+
+impl From<JsString> for HashJsString {
+    fn from(s: JsString) -> Self {
+        Self(s)
+    }
+}
+
+impl From<HashJsString> for JsString {
+    fn from(s: HashJsString) -> Self {
+        s.0
+    }
+}
+
+impl Deref for HashJsString {
+    type Target = JsString;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for Metadata {
+    type Target = HashMap<HashJsString, JsValue>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl DerefMut for Metadata {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.map
+    }
+}
+
+/// Node metadata. This is a key-value map of metadata associated with the node.
+/// This can be used to store additional information about the node for UI purposes.
+/// This is not used by the canvas itself.
+#[derive(Debug, Clone)]
+#[wasm_bindgen(js_name = NodeMeta)]
+pub struct JsNodeMeta {
+    project_uuid: Uuid,
+    node_id: canvas::Id,
+}
+
+impl ProjectHandle for JsNodeMeta {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+}
+
+impl NodeHandle for JsNodeMeta {
+    fn node_id(&self) -> canvas::Id {
+        self.node_id
+    }
+}
+
+#[wasm_bindgen(js_class = NodeMeta)]
+impl JsNodeMeta {
+    /// Get the value associated with the given key.
+    pub fn get(&self, key: JsString) -> Result<JsValue, JsError> {
+        self.checked_node_read(|node| {
+            Ok(node
+                .meta
+                .get(&key.into())
+                .cloned()
+                .unwrap_or(JsValue::UNDEFINED))
+        })
+    }
+
+    /// Set the value associated with the given key, removing the old value if it exists.
+    /// Returns the removed value that was assigned beforehand (if any).
+    pub fn set(&self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
+        self.ensure_node_write(|node| {
+            Ok(node
+                .meta
+                .insert(key.into(), value)
+                .unwrap_or(JsValue::UNDEFINED))
+        })
+    }
+
+    /// Remove the value associated with the given key. Returns the value that was removed,
+    /// if it was assigned beforehand.
+    #[wasm_bindgen(js_name = remove)]
+    pub fn remove(&self, key: JsString) -> Result<JsValue, JsError> {
+        self.ensure_node_write(|project| {
+            Ok(project
+                .meta
+                .remove(&key.into())
+                .unwrap_or(JsValue::UNDEFINED))
+        })
+    }
+
+    /// Get the keys of the metadata.
+    #[wasm_bindgen(js_name = keys)]
+    pub fn keys(&self) -> Result<Vec<JsString>, JsError> {
+        self.checked_node_read(|node| Ok(node.meta.keys().cloned().map(Into::into).collect()))
+    }
+}
+
+/// Key-value map of metadata associated with the project.
+/// Similar to [JsNodeMeta] for nodes.
+#[derive(Debug, Clone)]
+#[wasm_bindgen(js_name = ProjectMeta)]
+pub struct JsProjectMeta {
+    project_uuid: Uuid,
+}
+
+impl ProjectHandle for JsProjectMeta {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+}
+
+#[wasm_bindgen(js_class = ProjectMeta)]
+impl JsProjectMeta {
+    /// Get the value associated with the given key.
+    pub fn get(&self, key: JsString) -> Result<JsValue, JsError> {
+        self.checked_read(|project| {
+            Ok(project
+                .meta
+                .get(&key.into())
+                .cloned()
+                .unwrap_or(JsValue::UNDEFINED))
+        })
+    }
+
+    /// Set the value associated with the given key, removing the old value if it exists.
+    /// Returns the removed value that was assigned beforehand (if any).
+    pub fn set(&self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
+        self.checked_write(|project| {
+            Ok(project
+                .meta
+                .insert(key.into(), value)
+                .unwrap_or(JsValue::UNDEFINED))
+        })
+    }
+
+    /// Remove the value associated with the given key. Returns the value that was removed,
+    /// if it was assigned beforehand.
+    #[wasm_bindgen(js_name = remove)]
+    pub fn remove(&self, key: JsString) -> Result<JsValue, JsError> {
+        self.checked_write(|project| {
+            Ok(project
+                .meta
+                .remove(&key.into())
+                .unwrap_or(JsValue::UNDEFINED))
+        })
+    }
+
+    /// Get the keys of the metadata.
+    #[wasm_bindgen(js_name = keys)]
+    pub fn keys(&self) -> Result<Vec<JsString>, JsError> {
+        self.checked_read(|project| Ok(project.meta.keys().cloned().map(Into::into).collect()))
+    }
+}
 
 /// Kind of the data type.
 #[derive(Debug, Clone, Copy)]
