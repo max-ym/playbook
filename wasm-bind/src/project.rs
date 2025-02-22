@@ -472,10 +472,11 @@ impl JsNode {
     /// Associate new metadata with the node.
     /// Metadata should be represented by a JSON-deserializable object.
     /// Otherwise this will throw an error.
+    /// See [WorkSessionProject::alter_node_meta] for more information.
     #[wasm_bindgen(setter, js_name = meta)]
-    pub fn set_meta(&self, key: JsString, meta: JsValue) -> Result<(), JsError> {
+    pub fn set_meta(&self, key: JsString, meta: JsValue, flatten: bool) -> Result<(), JsError> {
         self.ensure_node_write(|project| {
-            project.patch_node_meta(self.node_id, key.into(), meta)?;
+            project.alter_node_meta(self.node_id, key.into(), meta, flatten)?;
             Ok(())
         })
     }

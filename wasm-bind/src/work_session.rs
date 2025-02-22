@@ -234,6 +234,22 @@ impl WorkSessionProject {
         self.changes.stack.get(pos)
     }
 
+    /// See [WorkSessionProject::change_at].
+    pub fn change_at_mut(&mut self, pos: usize) -> Option<&mut ChangeItem> {
+        self.changes.stack.get_mut(pos)
+    }
+
+    /// Get the change in the history stack to which the project is currently pointing.
+    /// If pointer was not moved by undoing, this is the last change made.
+    pub fn current_change(&self) -> Option<&ChangeItem> {
+        self.change_at(self.changes.pos)
+    }
+
+    /// See [WorkSessionProject::current_change].
+    pub fn current_change_mut(&mut self) -> Option<&mut ChangeItem> {
+        self.change_at_mut(self.changes.pos)
+    }
+
     /// Checkout changes in the stack of changes. This is used to detect if the project
     /// was changed since some state, either because of new operations, or because
     /// of undo/redo operations.
@@ -279,13 +295,69 @@ impl WorkSessionProject {
         todo!()
     }
 
-    pub fn patch_node_meta(
+    /// Alter metadata of a node.
+    ///
+    /// # Flatten
+    /// If `flatten` is true and the last operation was also altering the same metadata key
+    /// of the same node,
+    /// the new value will be merged with the previous one into a single operation.
+    ///
+    /// Intention here is to allow for efficient storage of node position metadata,
+    /// which is updated frequently when user is moving it. Since we're storing full copy
+    /// of each metadata version during changes, this can lead to a lot of data being stored
+    /// in the history stack. By merging the changes, we can reduce the amount of data stored
+    /// and thus improve performance. This also means that when user will be undoing
+    /// the move, the node will be moved back to the original position, instead of moving
+    /// it back by each step. UI can decide to make some intermediate steps when
+    /// there is a lot of moves to have snapshots, but not each small change has to be
+    /// stored in the history stack, and this boolean argument allows to control this.
+    pub fn alter_node_meta(
         &mut self,
         node_id: canvas::Id,
         key: JsString,
         new: JsValue,
+        flatten: bool,
     ) -> Result<(), NodeNotFoundError> {
-        todo!()
+        trace!("alter node {node_id} metadata for key `{key}`");
+        self.ensure_node_exists(node_id)?;
+
+        if let Some(last_op) = self.current_change_mut() {
+            if flatten {
+                if let ChangeOp::AlterNodeMetadata {
+                    node_id: last_node_id,
+                    key: ref last_key,
+                    new: _,
+                    backup: ref last_backup,
+                } = last_op.op
+                {
+                    if last_node_id == node_id && *last_key == key {
+                        trace!("flatten metadata change for node {node_id} key `{key}`");
+                        let new_op = ChangeOp::AlterNodeMetadata {
+                            node_id,
+                            key,
+                            new,
+                            backup: last_backup.clone(),
+                        };
+                        last_op.replace_change(new_op);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        let stub = ChangeOpStub::AlterNodeMetadata { node_id, key, new };
+        let op = ChangeOp::apply(stub, self);
+        self.changes.push_op(op);
+        Ok(())
+    }
+
+    fn ensure_node_exists(&self, node_id: canvas::Id) -> Result<(), NodeNotFoundError> {
+        trace!("Ensure node {node_id} exists");
+        self.project
+            .canvas()
+            .node(node_id)
+            .ok_or(NodeNotFoundError(node_id))?;
+        Ok(())
     }
 
     /// Get the known data type of the pin. [None] if the pin type is not known.
@@ -556,7 +628,7 @@ pub struct ChangeStack {
     stack: Vec<ChangeItem>,
 
     /// Current position in the history stack, that is reflected on the canvas
-    /// of the project and, consequently, in the UI.
+    /// of the project and, consequently, on the UI.
     pos: usize,
 }
 
@@ -566,6 +638,16 @@ impl ChangeStack {
             stack: Vec::new(),
             pos: 0,
         }
+    }
+
+    pub fn push_op(&mut self, op: ChangeOp) {
+        self.stack.truncate(self.pos);
+        self.stack.push(ChangeItem {
+            timestamp: SystemTime::now(),
+            op,
+            meta: JsValue::UNDEFINED,
+        });
+        self.pos += 1;
     }
 }
 
@@ -580,19 +662,22 @@ pub struct CheckoutChangedStack {
     time: std::time::SystemTime,
 }
 
-/// Change item in the history stack of changes. This has one or more operations
+/// Change item in the history stack of changes. This has one operation
 /// associated with it, that can be applied to or reverted in the project.
+/// It also has metadata associated with the change from JS side.
+/// This is a smallest unit of action recordable in the history stack.
+#[derive(Debug)]
 pub struct ChangeItem {
-    /// Timestamp of the last change in [Self::op] array.
+    /// Timestamp of the change.
     timestamp: std::time::SystemTime,
 
-    /// Array of operations that describes this change.
-    /// At least one operation is always present.
-    op: SmallVec<[ChangeOp; 1]>,
+    /// Operation that describes this change.
+    op: ChangeOp,
 
-    /// Metadata associated with the change. This allows to
-    /// manage the lifecycle of the value with the history item
-    /// itself, so that JS side is not responsible for resource management.
+    /// Metadata associated with the change from UI. This allows to
+    /// manage the lifecycle of the associated value with the history item
+    /// itself, so that JS side is not responsible for resource management in case
+    /// this history item gets dropped.
     meta: JsValue,
 }
 
@@ -604,16 +689,12 @@ impl ChangeItem {
             .unwrap_or_default()
             .as_micros()
     }
-}
 
-/// Builder for the change item. This merges multiple change operations into a single
-/// change operation where applicable. E.g. if node metadata is repeatedly changed,
-/// this will merge all these changes into a single change operation.
-pub struct ChangeItemBuilder {
-    timestamp: std::time::SystemTime,
-    linear: SmallVec<[ChangeOp; 1]>,
-    node_meta: Metadata,
-    project_meta: Metadata,
+    /// Replace the change with the given one, and update the timestamp.
+    fn replace_change(&mut self, op: ChangeOp) {
+        self.op = op;
+        self.timestamp = SystemTime::now();
+    }
 }
 
 /// Change operation stub, that can be used to execute actual change operation,
@@ -714,11 +795,11 @@ impl ChangeOp {
 
         match change_op_stub {
             S::AddNode { stub } => {
-                let new_id = project
+                let id = project
                     .project
                     .canvas_mut()
                     .add_node(stub.as_ref().clone(), Default::default());
-                AddNode { stub, id: new_id }
+                AddNode { stub, id }
             }
             S::RemoveNode { id } => {
                 let (node, removed_edges) = project
@@ -839,7 +920,11 @@ impl ChangeOp {
                     .meta;
                 meta.insert(key.into(), backup);
             }
-            AlterProjectMetadata { key, new: _, backup } => {
+            AlterProjectMetadata {
+                key,
+                new: _,
+                backup,
+            } => {
                 let meta = &mut project.project.meta;
                 meta.insert(key.into(), backup);
             }
