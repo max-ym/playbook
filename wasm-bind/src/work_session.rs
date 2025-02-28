@@ -8,7 +8,7 @@ use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
-use crate::project::{Metadata, Project};
+use crate::project::{Metadata, Project, ProjectHandle};
 use crate::*;
 
 /// Change operations that can be performed on the project.
@@ -205,7 +205,6 @@ impl WorkSessionProject {
         if let Some((op, project)) = self.change_at_mut_with_project(new_pos) {
             trace!("redoing change");
             op.op.apply(project);
-            op.refresh_timestamp();
             self.changes.pos = new_pos;
             Some(old_changes_pos)
         } else {
@@ -283,12 +282,18 @@ impl WorkSessionProject {
     /// was changed since some state, either because of new operations, or because
     /// of undo/redo operations.
     pub fn stack_checkout(&self) -> CheckoutChangedStack {
+        self.stack_checkout_pos(self.changes.pos)
+    }
+
+    /// Checkout changes in the stack of changes at a specific position.
+    /// See [WorkSessionProject::stack_checkout].
+    pub fn stack_checkout_pos(&self, pos: usize) -> CheckoutChangedStack {
         CheckoutChangedStack {
-            pos: self.changes.pos,
+            pos,
             time: self
                 .changes
                 .stack
-                .last()
+                .get(pos)
                 .map(|c| c.timestamp)
                 .unwrap_or(SystemTime::now()),
         }
@@ -482,9 +487,8 @@ impl JsHistory {
         let mut ws = wsw!();
         let project = ws.current_project_mut()?;
         let position = project.undo()?;
-        project.change_at(position).map(|change| JsChangeItem {
-            timestamp: change.micros_since_unix() as u64,
-            position,
+        project.change_at(position).map(|_| JsChangeItem {
+            checkout: project.stack_checkout_pos(position),
             project_uuid: project.uuid(),
         })
     }
@@ -496,9 +500,8 @@ impl JsHistory {
         let mut ws = wsw!();
         let project = ws.current_project_mut()?;
         let position = project.redo()?;
-        project.change_at(position).map(|change| JsChangeItem {
-            timestamp: change.micros_since_unix() as u64,
-            position,
+        project.change_at(position).map(|_| JsChangeItem {
+            checkout: project.stack_checkout_pos(position),
             project_uuid: project.uuid(),
         })
     }
@@ -519,9 +522,8 @@ impl JsHistory {
     pub fn change_at(pos: usize) -> Option<JsChangeItem> {
         let ws = work_session().read().expect(WORK_SESSION_POISONED);
         let project = ws.current_project()?;
-        project.change_at(pos).map(|change| JsChangeItem {
-            timestamp: change.micros_since_unix() as u64,
-            position: pos,
+        project.change_at(pos).map(|_| JsChangeItem {
+            checkout: project.stack_checkout_pos(pos),
             project_uuid: project.uuid(),
         })
     }
@@ -541,10 +543,35 @@ impl JsHistory {
 #[derive(Debug)]
 #[wasm_bindgen(js_name = ChangeItem)]
 pub struct JsChangeItem {
+    checkout: CheckoutChangedStack,
+    project_uuid: Uuid,
+}
+
+impl ProjectHandle for JsChangeItem {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+
+    fn inner_validation(&self) -> bool {
+        let ws = wsr!();
+        if let Some(project) = ws.project_by_id(self.project_uuid) {
+            // Ensure that the change item is still the same identity as it was
+            //  when the handle was created.
+            self.checkout == project.stack_checkout_pos(self.checkout.pos)
+        } else {
+            false
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = ChangeItem)]
+impl JsChangeItem {
     /// Timestamp of the change.
     /// It is used internally to verify the validity of the handle.
-    #[wasm_bindgen(readonly)]
-    pub timestamp: u64,
+    #[wasm_bindgen(getter)]
+    pub fn timestamp(&self) -> u64 {
+        self.checkout.timestamp() as u64
+    }
 
     /// Position of the change in the history stack.
     /// This together with the timestamp can be used to uniquely identify a change.
@@ -553,13 +580,11 @@ pub struct JsChangeItem {
     /// change (identifiable by the timestamp), this means that the history stack
     /// was modified in the meantime. Then this handle is invalid and further operations
     /// on it will result in an error.
-    position: usize,
+    #[wasm_bindgen(getter)]
+    pub fn position(&self) -> usize {
+        self.checkout.pos
+    }
 
-    project_uuid: Uuid,
-}
-
-#[wasm_bindgen(js_class = ChangeItem)]
-impl JsChangeItem {
     /// Check if the change handle is still valid.
     ///
     /// During execution, the history stack can get modified. Then this handle can get invalid if
@@ -567,63 +592,55 @@ impl JsChangeItem {
     /// on it will result in an error.
     #[wasm_bindgen(getter, js_name = isValid)]
     pub fn is_valid(&self) -> bool {
-        let ws = wsr!();
-        if let Some(project) = ws.project_by_id(self.project_uuid) {
-            if let Some(change) = project.change_at(self.position) {
-                change.micros_since_unix() as u64 == self.timestamp
-            } else {
-                debug!("js change item - change not found in the project");
-                false
-            }
-        } else {
-            debug!("js change item - project not found in the work session");
-            false
-        }
+        self.inner_validation()
     }
 
     /// Get the operation that was performed.
     /// This information is necessary to reflect the change in the UI.
     /// If the handle is invalid, this will return an error.
-    pub fn operation(&self) -> Result<JsChangeOp, InvalidHandleError> {
-        if !self.is_valid() {
-            error!("js change item - use of invalid handle");
-            return Err(InvalidHandleError);
-        }
-
-        todo!()
+    pub fn operation(&self) -> Result<JsValue, InvalidHandleError> {
+        todo!("Decide how to pass enough info to JS, what is that info?")
     }
-}
 
-/// Change operation that was performed on the project with related data. This
-/// information is necessary to reflect the change in the UI.
-#[derive(Debug)]
-#[wasm_bindgen(js_name = ChangeOp)]
-pub struct JsChangeOp {
-    // TODO
-}
-
-#[wasm_bindgen(js_class = ChangeOp)]
-impl JsChangeOp {
-    // TODO
-
-    /// Set metadata for this history item. This allows UI to associate some
+    /// Metadata for this history item. This allows UI to associate some
     /// additional information with the change, and removes the responsibility of
     /// managing the lifecycle of the metadata from the caller. E.g. if this history
     /// item gets dropped, associated metadata will be dropped automatically as well, without
     /// any JS intervention.
     #[wasm_bindgen(js_name = meta, getter)]
-    pub fn set_meta(&mut self, js: JsValue) {
-        // TODO
-    }
-
-    /// Get metadata associated with this history item.
-    /// See [JsChangeOp::set_meta] for more information.
-    #[wasm_bindgen(js_name = meta, getter)]
-    pub fn get_meta(&self) -> JsValue {
-        // TODO
-        JsValue::NULL
+    pub fn meta(&self) -> JsChangeItemMeta {
+        JsChangeItemMeta {
+            project_uuid: self.project_uuid,
+            checkout: self.checkout,
+        }
     }
 }
+
+#[wasm_bindgen(js_name = ChangeOpMeta)]
+#[derive(Debug)]
+pub struct JsChangeItemMeta {
+    project_uuid: Uuid,
+    checkout: CheckoutChangedStack,
+}
+
+impl ProjectHandle for JsChangeItemMeta {
+    fn project_uuid(&self) -> Uuid {
+        self.project_uuid
+    }
+
+    fn inner_validation(&self) -> bool {
+        let ws = wsr!();
+        if let Some(project) = ws.project_by_id(self.project_uuid) {
+            // Ensure that the change item is still the same identity as it was
+            //  when the handle was created.
+            self.checkout == project.stack_checkout_pos(self.checkout.pos)
+        } else {
+            false
+        }
+    }
+}
+
+impl_meta!(JsChangeItemMeta, ChangeOpMeta);
 
 /// Error when trying to access an uninitialized or incorrectly initialized work session.
 #[wasm_bindgen(js_name = WorkSessionUninitError)]
@@ -664,13 +681,22 @@ impl ChangeStack {
 
 /// Checkout changes in the stack of changes. This is used to detect if the project
 /// was changed since some state.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CheckoutChangedStack {
     /// Position in the history stack.
     pos: usize,
 
     /// Timestamp of the last change.
     time: std::time::SystemTime,
+}
+
+impl CheckoutChangedStack {
+    pub fn timestamp(&self) -> u128 {
+        self.time
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+    }
 }
 
 /// Change item in the history stack of changes. This has one operation
@@ -689,7 +715,7 @@ pub struct ChangeItem {
     /// manage the lifecycle of the associated value with the history item
     /// itself, so that JS side is not responsible for resource management in case
     /// this history item gets dropped.
-    meta: JsValue,
+    meta: Metadata,
 }
 
 impl ChangeItem {
@@ -697,7 +723,7 @@ impl ChangeItem {
         Self {
             timestamp: SystemTime::now(),
             op,
-            meta: JsValue::UNDEFINED,
+            meta: Metadata::default(),
         }
     }
 

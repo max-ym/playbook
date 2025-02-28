@@ -14,8 +14,8 @@ use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    work_session::{self, wsr, wsw, CheckoutChangedStack, WorkSessionProject},
     InvalidHandleError, MyUuid, PermissionError,
+    work_session::{self, CheckoutChangedStack, WorkSessionProject, wsr, wsw},
 };
 
 /// JavaScript node structures.
@@ -189,7 +189,9 @@ impl JsProject {
     /// Get the metadata associated with the project by the client.
     #[wasm_bindgen(getter)]
     pub fn meta(&self) -> JsProjectMeta {
-        todo!()
+        JsProjectMeta {
+            project_uuid: self.uuid,
+        }
     }
 }
 
@@ -232,8 +234,16 @@ impl From<ProjectNotFoundError> for InvalidHandleError {
     }
 }
 
+/// A trait for handles that are associated with a project.
 pub(crate) trait ProjectHandle {
     fn project_uuid(&self) -> Uuid;
+
+    /// Validate the handle by some inner custom mechanism.
+    /// This is used to ensure that the handle is still valid even when Project UUID might
+    /// be valid by itself, unlike some other inner resource the handle points to.
+    fn inner_validation(&self) -> bool {
+        true
+    }
 
     /// Check the validity of the handle and then proceed with the given function.
     /// If the project is not found, this will return an [ProjectNotFoundError].
@@ -242,6 +252,10 @@ pub(crate) trait ProjectHandle {
         &self,
         f: impl FnOnce(&mut WorkSessionProject) -> Result<T, JsError>,
     ) -> Result<T, JsError> {
+        if !self.inner_validation() {
+            return Err(InvalidHandleError.into());
+        }
+
         let mut ws = wsw!();
         let project = ws.project_by_id_mut(self.project_uuid());
         if let Some(project) = project {
@@ -260,6 +274,10 @@ pub(crate) trait ProjectHandle {
         &self,
         f: impl FnOnce(&WorkSessionProject) -> Result<T, JsError>,
     ) -> Result<T, JsError> {
+        if !self.inner_validation() {
+            return Err(InvalidHandleError.into());
+        }
+
         let ws = wsr!();
         let project = ws.project_by_id(self.project_uuid());
         if let Some(project) = project {
@@ -293,6 +311,9 @@ impl JsCanvas {
     }
 
     /// Add a new edge between two pins.
+    ///
+    /// # Errors
+    /// If the edge cannot be added, this will return an error.
     #[wasm_bindgen(js_name = addEdge)]
     pub fn add_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
         use canvas::{Edge, InputPin, OutputPin, Pin};
@@ -312,6 +333,9 @@ impl JsCanvas {
     }
 
     /// Remove an edge between two pins.
+    ///
+    /// # Errors
+    /// If the edge does not exist, this will return an error.
     #[wasm_bindgen(js_name = removeEdge)]
     pub fn remove_edge(&mut self, from: JsNodePin, to: JsNodePin) -> Result<(), JsError> {
         use canvas::{Edge, InputPin, OutputPin, Pin};
@@ -364,6 +388,7 @@ impl ProjectHandle for JsNode {
     }
 }
 
+/// A trait for handles that are associated with a node.
 pub(crate) trait NodeHandle: ProjectHandle {
     fn node_id(&self) -> canvas::Id;
 
@@ -469,22 +494,13 @@ impl JsNode {
         })
     }
 
-    /// Associate new metadata with the node.
-    /// Metadata should be represented by a JSON-deserializable object.
-    /// Otherwise this will throw an error.
-    /// See [WorkSessionProject::alter_node_meta] for more information.
-    #[wasm_bindgen(setter, js_name = meta)]
-    pub fn set_meta(&self, key: JsString, meta: JsValue, flatten: bool) -> Result<(), JsError> {
-        self.ensure_node_write(|project| {
-            project.alter_node_meta(self.node_id, key.into(), meta, flatten)?;
-            Ok(())
-        })
-    }
-
     /// Get the metadata associated with the node by the client.
     #[wasm_bindgen(getter)]
-    pub fn meta(&self) -> JsValue {
-        todo!()
+    pub fn meta(&self) -> JsNodeMeta {
+        JsNodeMeta {
+            project_uuid: self.project_uuid,
+            node_id: self.node_id,
+        }
     }
 }
 
@@ -716,49 +732,6 @@ impl NodeHandle for JsNodeMeta {
     }
 }
 
-#[wasm_bindgen(js_class = NodeMeta)]
-impl JsNodeMeta {
-    /// Get the value associated with the given key.
-    pub fn get(&self, key: JsString) -> Result<JsValue, JsError> {
-        self.checked_node_read(|node| {
-            Ok(node
-                .meta
-                .get(&key.into())
-                .cloned()
-                .unwrap_or(JsValue::UNDEFINED))
-        })
-    }
-
-    /// Set the value associated with the given key, removing the old value if it exists.
-    /// Returns the removed value that was assigned beforehand (if any).
-    pub fn set(&self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
-        self.ensure_node_write(|node| {
-            Ok(node
-                .meta
-                .insert(key.into(), value)
-                .unwrap_or(JsValue::UNDEFINED))
-        })
-    }
-
-    /// Remove the value associated with the given key. Returns the value that was removed,
-    /// if it was assigned beforehand.
-    #[wasm_bindgen(js_name = remove)]
-    pub fn remove(&self, key: JsString) -> Result<JsValue, JsError> {
-        self.ensure_node_write(|project| {
-            Ok(project
-                .meta
-                .remove(&key.into())
-                .unwrap_or(JsValue::UNDEFINED))
-        })
-    }
-
-    /// Get the keys of the metadata.
-    #[wasm_bindgen(js_name = keys)]
-    pub fn keys(&self) -> Result<Vec<JsString>, JsError> {
-        self.checked_node_read(|node| Ok(node.meta.keys().cloned().map(Into::into).collect()))
-    }
-}
-
 /// Key-value map of metadata associated with the project.
 /// Similar to [JsNodeMeta] for nodes.
 #[derive(Debug, Clone)]
@@ -773,48 +746,62 @@ impl ProjectHandle for JsProjectMeta {
     }
 }
 
-#[wasm_bindgen(js_class = ProjectMeta)]
-impl JsProjectMeta {
-    /// Get the value associated with the given key.
-    pub fn get(&self, key: JsString) -> Result<JsValue, JsError> {
-        self.checked_read(|project| {
-            Ok(project
-                .meta
-                .get(&key.into())
-                .cloned()
-                .unwrap_or(JsValue::UNDEFINED))
-        })
-    }
+#[macro_export]
+macro_rules! impl_meta {
+    ($name:ident, $js_name:ident) => {
+        #[wasm_bindgen(js_class = $js_name)]
+        impl $name {
+            /// Get the value associated with the given key.
+            pub fn get(&self, key: JsString) -> Result<JsValue, JsError> {
+                self.checked_read(|project| {
+                    Ok(project
+                        .meta
+                        .get(&key.into())
+                        .cloned()
+                        .unwrap_or(JsValue::UNDEFINED)
+                        .into())
+                })
+            }
 
-    /// Set the value associated with the given key, removing the old value if it exists.
-    /// Returns the removed value that was assigned beforehand (if any).
-    pub fn set(&self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
-        self.checked_write(|project| {
-            Ok(project
-                .meta
-                .insert(key.into(), value)
-                .unwrap_or(JsValue::UNDEFINED))
-        })
-    }
+            /// Set the value associated with the given key, removing the old value if it exists.
+            /// Returns the removed value that was assigned beforehand (if any).
+            pub fn set(&self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
+                self.checked_write(|project| {
+                    Ok(project
+                        .meta
+                        .insert(key.into(), value.into())
+                        .unwrap_or(JsValue::UNDEFINED)
+                        .into())
+                })
+            }
 
-    /// Remove the value associated with the given key. Returns the value that was removed,
-    /// if it was assigned beforehand.
-    #[wasm_bindgen(js_name = remove)]
-    pub fn remove(&self, key: JsString) -> Result<JsValue, JsError> {
-        self.checked_write(|project| {
-            Ok(project
-                .meta
-                .remove(&key.into())
-                .unwrap_or(JsValue::UNDEFINED))
-        })
-    }
+            /// Remove the value associated with the given key. Returns the value that was removed,
+            /// if it was assigned beforehand.
+            #[wasm_bindgen(js_name = remove)]
+            pub fn remove(&self, key: JsString) -> Result<JsValue, JsError> {
+                self.checked_write(|project| {
+                    Ok(project
+                        .meta
+                        .remove(&key.into())
+                        .unwrap_or(JsValue::UNDEFINED)
+                        .into())
+                })
+            }
 
-    /// Get the keys of the metadata.
-    #[wasm_bindgen(js_name = keys)]
-    pub fn keys(&self) -> Result<Vec<JsString>, JsError> {
-        self.checked_read(|project| Ok(project.meta.keys().cloned().map(Into::into).collect()))
-    }
+            /// Get the keys of the metadata.
+            #[wasm_bindgen(js_name = keys)]
+            pub fn keys(&self) -> Result<Vec<JsString>, JsError> {
+                self.checked_read(|project| {
+                    Ok(project.meta.keys().cloned().map(Into::into).collect())
+                })
+            }
+        }
+    };
 }
+pub use impl_meta;
+
+impl_meta!(JsProjectMeta, ProjectMeta);
+impl_meta!(JsNodeMeta, NodeMeta);
 
 /// Kind of the data type.
 #[derive(Debug, Clone, Copy)]
@@ -848,8 +835,8 @@ pub struct JsDataType {
 impl JsDataType {
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> JsDataTypeKind {
-        use canvas::PrimitiveType::*;
         use JsDataTypeKind as J;
+        use canvas::PrimitiveType::*;
         match &self.repr {
             Int => J::Int,
             Uint => J::Uint,
