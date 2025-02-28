@@ -520,7 +520,7 @@ impl JsHistory {
     /// If the position is out of bounds, returns `undefined`.
     #[wasm_bindgen(js_name = changeAt)]
     pub fn change_at(pos: usize) -> Option<JsChangeItem> {
-        let ws = work_session().read().expect(WORK_SESSION_POISONED);
+        let ws = wsr!();
         let project = ws.current_project()?;
         project.change_at(pos).map(|_| JsChangeItem {
             checkout: project.stack_checkout_pos(pos),
@@ -532,7 +532,7 @@ impl JsHistory {
     /// the current position.
     #[wasm_bindgen(js_name = length, getter)]
     pub fn length() -> usize {
-        let ws = work_session().read().expect(WORK_SESSION_POISONED);
+        let ws = wsr!();
         let project = ws.current_project();
         project.map_or(0, |p| p.changes.stack.len())
     }
