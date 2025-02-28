@@ -13,7 +13,6 @@ use crate::*;
 
 /// Change operations that can be performed on the project.
 mod change_op;
-use change_op::*;
 pub use change_op::{ChangeOp, ChangeOpStub};
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
