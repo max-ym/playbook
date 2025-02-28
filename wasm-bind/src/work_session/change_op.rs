@@ -1,32 +1,5 @@
 use super::*;
 
-/// Change operation stub, that can be used to execute actual change operation,
-/// which than will record all necessary information to the history stack.
-#[derive(Debug, Clone)]
-pub enum ChangeOpStub {
-    AddNode {
-        stub: Box<canvas::NodeStub>,
-    },
-    RemoveNode {
-        id: canvas::Id,
-    },
-    AddEdge {
-        edge: canvas::Edge,
-    },
-    RemoveEdge {
-        edge: canvas::Edge,
-    },
-    AlterNodeMetadata {
-        node_id: canvas::Id,
-        key: JsString,
-        new: JsValue,
-    },
-    AlterProjectMetadata {
-        key: JsString,
-        new: JsValue,
-    },
-}
-
 /// Single change operation that was performed on the project.
 /// This record allows to revert the existing change.
 /// This is the smallest unit of action recordable in [ChangeItem].
@@ -89,40 +62,38 @@ impl ChangeOp {
     /// This method panics if the operation cannot be applied, which cannot
     /// happen if the operation was recorded correctly and when all changes are
     /// tracked correctly.
-    pub(super) fn apply(
-        project: &mut WorkSessionProject,
-        change_op_stub: ChangeOpStub,
-    ) -> ChangeOp {
-        use ChangeOpStub::*;
+    pub(super) fn apply(&mut self, project: &mut Project) {
+        use ChangeOp::*;
 
         const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
         const EXPECT_FOUND_EDGE: &str = "edge not found, though operation was recorded";
 
-        match change_op_stub {
-            AddNode { stub } => Self::add_node(project, (*stub).clone()).into(),
-            RemoveNode { id } => Self::remove_node(project, id)
+        let new = match self {
+            AddNode { stub, .. } => Self::add_node(project, (**stub).clone()).into(),
+            RemoveNode { id, .. } => Self::remove_node(project, *id)
                 .expect(EXPECT_FOUND_NODE)
                 .into(),
-            AddEdge { edge } => Self::add_edge(project, edge)
+            AddEdge { edge } => Self::add_edge(project, *edge)
                 .expect(EXPECT_FOUND_EDGE)
                 .into(),
-            RemoveEdge { edge } => Self::remove_edge(project, edge)
+            RemoveEdge { edge } => Self::remove_edge(project, *edge)
                 .expect(EXPECT_FOUND_EDGE)
                 .into(),
-            AlterNodeMetadata { node_id, key, new } => {
-                Self::alter_node_metadata(project, node_id, key, new)
-                    .expect(EXPECT_FOUND_NODE)
-                    .into()
+            AlterNodeMetadata {
+                node_id, key, new, ..
+            } => Self::alter_node_metadata(project, *node_id, key.clone(), new.clone())
+                .expect(EXPECT_FOUND_NODE)
+                .into(),
+            AlterProjectMetadata { key, new, .. } => {
+                Self::alter_project_metadata(project, key.clone(), new.clone()).into()
             }
-            AlterProjectMetadata { key, new } => {
-                Self::alter_project_metadata(project, key, new).into()
-            }
-        }
+        };
+        *self = new;
     }
 
     /// Revert the change operation from the project.
     /// This is the opposite of [ChangeOp::apply].
-    pub(super) fn revert(self, project: &mut WorkSessionProject) {
+    pub(super) fn revert(&self, project: &mut Project) {
         use ChangeOp::*;
 
         const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
@@ -131,9 +102,8 @@ impl ChangeOp {
         match self {
             AddNode { id, .. } => {
                 project
-                    .project
                     .canvas_mut()
-                    .remove_node(id)
+                    .remove_node(*id)
                     .expect(EXPECT_FOUND_NODE);
             }
             RemoveNode {
@@ -142,28 +112,27 @@ impl ChangeOp {
                 meta,
                 id: _,
             } => {
-                project.project.canvas_mut().add_node(*stub, meta);
+                project
+                    .canvas_mut()
+                    .add_node((**stub).clone(), meta.clone());
 
                 for edge in removed_edges {
                     project
-                        .project
                         .canvas_mut()
-                        .add_edge(edge)
+                        .add_edge(*edge)
                         .expect(EXPECT_FOUND_EDGE);
                 }
             }
             AddEdge { edge } => {
                 project
-                    .project
                     .canvas_mut()
-                    .remove_edge(edge)
+                    .remove_edge(*edge)
                     .expect(EXPECT_FOUND_EDGE);
             }
             RemoveEdge { edge } => {
                 project
-                    .project
                     .canvas_mut()
-                    .add_edge(edge)
+                    .add_edge(*edge)
                     .expect(EXPECT_FOUND_EDGE);
             }
             AlterNodeMetadata {
@@ -173,64 +142,61 @@ impl ChangeOp {
                 backup,
             } => {
                 let meta = &mut project
-                    .project
                     .canvas_mut()
-                    .node_mut(node_id)
+                    .node_mut(*node_id)
                     .expect(EXPECT_FOUND_NODE)
                     .meta;
-                meta.insert(key.into(), backup);
+                meta.insert(key.clone().into(), backup.clone());
             }
             AlterProjectMetadata {
                 key,
                 new: _,
                 backup,
             } => {
-                let meta = &mut project.project.meta;
-                meta.insert(key.into(), backup);
+                let meta = &mut project.meta;
+                meta.insert(key.clone().into(), backup.clone());
             }
         }
     }
 
-    pub(super) fn add_node(project: &mut WorkSessionProject, stub: canvas::NodeStub) -> AddNode {
+    pub(super) fn add_node(project: &mut Project, stub: canvas::NodeStub) -> AddNode {
         let id = project
-            .project
             .canvas_mut()
             .add_node(stub.clone(), Default::default());
         AddNode { stub, id }
     }
 
     pub(super) fn remove_node(
-        project: &mut WorkSessionProject,
+        project: &mut Project,
         id: canvas::Id,
     ) -> Result<RemoveNode, NodeNotFoundError> {
-        let (node, edges) = project.project.canvas_mut().remove_node(id)?;
+        let (node, edges) = project.canvas_mut().remove_node(id)?;
         Ok(RemoveNode { node, edges })
     }
 
     pub(super) fn add_edge(
-        project: &mut WorkSessionProject,
+        project: &mut Project,
         edge: canvas::Edge,
     ) -> Result<AddEdge, NodeNotFoundError> {
-        project.project.canvas_mut().add_edge(edge)?;
+        project.canvas_mut().add_edge(edge)?;
         Ok(AddEdge { edge })
     }
 
     pub(super) fn remove_edge(
-        project: &mut WorkSessionProject,
+        project: &mut Project,
         edge: canvas::Edge,
     ) -> Result<RemoveEdge, EdgeNotFoundError> {
-        project.project.canvas_mut().remove_edge(edge)?;
+        project.canvas_mut().remove_edge(edge)?;
         Ok(RemoveEdge { edge })
     }
 
     pub(super) fn alter_node_metadata(
-        project: &mut WorkSessionProject,
+        project: &mut Project,
         node_id: canvas::Id,
         key: JsString,
         new: JsValue,
     ) -> Result<AlterNodeMetadata, NodeNotFoundError> {
         let meta = &mut project
-            .project
             .canvas_mut()
             .node_mut(node_id)
             .ok_or(NodeNotFoundError(node_id))?
@@ -249,11 +215,11 @@ impl ChangeOp {
     }
 
     pub(super) fn alter_project_metadata(
-        project: &mut WorkSessionProject,
+        project: &mut Project,
         key: JsString,
         new: JsValue,
     ) -> AlterProjectMetadata {
-        let meta = &mut project.project.meta;
+        let meta = &mut project.meta;
         let backup = meta
             .insert(key.clone().into(), new.clone())
             .unwrap_or(JsValue::UNDEFINED);

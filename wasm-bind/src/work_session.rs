@@ -13,7 +13,7 @@ use crate::*;
 
 /// Change operations that can be performed on the project.
 mod change_op;
-pub use change_op::{ChangeOp, ChangeOpStub};
+pub use change_op::ChangeOp;
 
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
@@ -183,26 +183,35 @@ impl WorkSessionProject {
     /// Returns the position of the undone change in the history stack.
     /// If there are no changes to undo, returns `None`.
     pub fn undo(&mut self) -> Option<usize> {
-        if self.changes.pos == 0 {
-            debug!("no changes to undo");
-            return None;
-        }
-        trace!("undoing change");
+        let old_change_pos = self.changes.pos;
 
-        todo!()
+        if let Some(last_op) = self.current_change() {
+            trace!("undoing change");
+            last_op.op.to_owned().revert(self);
+            self.changes.pos -= 1;
+            Some(old_change_pos)
+        } else {
+            debug!("no change to undo");
+            None
+        }
     }
 
     /// Redo the last undone change.
     /// Returns the position of the redone change in the history stack.
     /// If there are no changes to redo, returns `None`.
     pub fn redo(&mut self) -> Option<usize> {
-        if self.changes.pos >= self.changes.stack.len() {
-            debug!("no changes to redo");
-            return None;
+        let old_changes_pos = self.changes.pos;
+        let new_pos = self.changes.pos + 1;
+        if let Some((op, project)) = self.change_at_mut_with_project(new_pos) {
+            trace!("redoing change");
+            op.op.apply(project);
+            op.refresh_timestamp();
+            self.changes.pos = new_pos;
+            Some(old_changes_pos)
+        } else {
+            debug!("no change to redo");
+            None
         }
-        trace!("redoing change");
-
-        todo!()
     }
 
     /// Go to a specific change.
@@ -247,6 +256,16 @@ impl WorkSessionProject {
     /// See [WorkSessionProject::change_at].
     pub fn change_at_mut(&mut self, pos: usize) -> Option<&mut ChangeItem> {
         self.changes.stack.get_mut(pos)
+    }
+
+    fn change_at_mut_with_project(
+        &mut self,
+        pos: usize,
+    ) -> Option<(&mut ChangeItem, &mut Project)> {
+        self.changes
+            .stack
+            .get_mut(pos)
+            .map(|change| (change, &mut self.project))
     }
 
     /// Get the change in the history stack to which the project is currently pointing.
@@ -690,11 +709,15 @@ impl ChangeItem {
             .as_micros()
     }
 
-    /// Replace the change with the given one, and update the timestamp.
-    ///
-    /// This effectively changes all but the [meta](ChangeItem::meta) of the change item.
-    fn replace_change(&mut self, op: ChangeOp) {
-        self.op = op;
+    /// Refresh the timestamp of the change to the current time.
+    fn refresh_timestamp(&mut self) {
         self.timestamp = SystemTime::now();
+    }
+
+    /// Replace the change operation with a new one, updating the timestamp. Metadata
+    /// of the history item is left unchanged.
+    fn replace_change(&mut self, change: ChangeOp) {
+        self.op = change;
+        self.refresh_timestamp();
     }
 }
