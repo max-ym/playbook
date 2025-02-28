@@ -11,6 +11,11 @@ use uuid::Uuid;
 use crate::project::{Metadata, Project};
 use crate::*;
 
+/// Change operations that can be performed on the project.
+mod change_op;
+use change_op::*;
+pub use change_op::{ChangeOp, ChangeOpStub};
+
 static WORK_SESSION: OnceLock<RwLock<WorkSession>> = OnceLock::new();
 
 #[macro_export]
@@ -36,6 +41,8 @@ macro_rules! wsw {
 pub use wsw;
 
 /// Access current work session lock.
+///
+/// This also effectively initializes this WASM package. Currently, it sets up the logger.
 pub fn work_session() -> &'static RwLock<WorkSession> {
     WORK_SESSION.get_or_init(|| {
         let _ = console_log::init_with_level(
@@ -53,13 +60,7 @@ pub struct WorkSession {
 
     /// Index of the current project in the `projects` vector.
     current_project_idx: usize,
-
-    /// Function to call to notify when the state of the work session changes.
-    on_state_change: Option<js_sys::Function>,
 }
-
-unsafe impl Send for WorkSession {}
-unsafe impl Sync for WorkSession {}
 
 impl std::default::Default for WorkSession {
     fn default() -> Self {
@@ -72,7 +73,6 @@ impl WorkSession {
         Self {
             projects: SmallVec::new(),
             current_project_idx: 0,
-            on_state_change: None,
         }
     }
 
@@ -129,7 +129,6 @@ impl WorkSession {
         self.projects.push(WorkSessionProject {
             project,
             changes: ChangeStack::new(),
-            revalidate: false,
         });
 
         Ok(())
@@ -153,10 +152,18 @@ pub struct WorkSessionProject {
 
     /// History stack of changes made to the project.
     changes: ChangeStack,
-
-    /// Whether the project should be revalidated.
-    revalidate: bool,
 }
+
+// Safety: WorkSessionProject should not shared between threads.
+// We have issues here because JavaScript values are internally just
+// pointers to the actual data, and we can't guarantee that the data is valid and
+// is not shared between threads. Ideally, all calls into this WASM module should be always in the
+// same worker thread, and the same object should never be shared between different workers.
+// This isolation provides safety against possible issues, which Rust warns us about.
+// Since Rust cannot prove this isolation, we have to use `unsafe impl` manually here to lift
+// the restriction, promissing to behave...
+unsafe impl Send for WorkSessionProject {}
+unsafe impl Sync for WorkSessionProject {}
 
 impl Deref for WorkSessionProject {
     type Target = Project;
@@ -190,7 +197,7 @@ impl WorkSessionProject {
     /// Returns the position of the redone change in the history stack.
     /// If there are no changes to redo, returns `None`.
     pub fn redo(&mut self) -> Option<usize> {
-        if self.changes.pos == self.changes.stack.len() {
+        if self.changes.pos >= self.changes.stack.len() {
             debug!("no changes to redo");
             return None;
         }
@@ -223,6 +230,10 @@ impl WorkSessionProject {
                 self.redo();
             }
         } else {
+            assert_eq!(
+                self.changes.pos, pos,
+                "above condition should be exhaustive, hence this should be the only correct state here",
+            );
             debug!("`goto` op on history stack found itself already at position {pos}");
         }
 
@@ -265,34 +276,36 @@ impl WorkSessionProject {
         }
     }
 
-    /// Mark the project as requiring revalidation.
-    fn require_revalidate(&mut self) {
-        trace!("project requires revalidation");
-        self.revalidate = true;
-    }
-
     pub fn add_node(&mut self, stub: canvas::NodeStub) -> canvas::Id {
         trace!("add node to the project: {stub:#?}");
 
-        todo!()
+        let op = ChangeOp::add_node(self, stub);
+        let id = op.id;
+
+        trace!("added node with ID {id}");
+        self.changes.push_op(op);
+        id
     }
 
     pub fn remove_node(&mut self, id: canvas::Id) -> Result<(), NodeNotFoundError> {
         trace!("remove node {id} from the project");
-
-        todo!()
+        let op = ChangeOp::remove_node(self, id)?;
+        self.changes.push_op(op);
+        Ok(())
     }
 
     pub fn add_edge(&mut self, edge: canvas::Edge) -> Result<(), NodeNotFoundError> {
         trace!("add edge {edge} to the project");
-
-        todo!()
+        let op = ChangeOp::add_edge(self, edge)?;
+        self.changes.push_op(op);
+        Ok(())
     }
 
     pub fn remove_edge(&mut self, edge: canvas::Edge) -> Result<(), EdgeNotFoundError> {
         trace!("remove edge {edge} from the project");
-
-        todo!()
+        let op = ChangeOp::remove_edge(self, edge)?;
+        self.changes.push_op(op);
+        Ok(())
     }
 
     /// Alter metadata of a node.
@@ -301,6 +314,7 @@ impl WorkSessionProject {
     /// If `flatten` is true and the last operation was also altering the same metadata key
     /// of the same node,
     /// the new value will be merged with the previous one into a single operation.
+    /// It has no effect if the previous operation was on the different key.
     ///
     /// Intention here is to allow for efficient storage of node position metadata,
     /// which is updated frequently when user is moving it. Since we're storing full copy
@@ -319,7 +333,6 @@ impl WorkSessionProject {
         flatten: bool,
     ) -> Result<(), NodeNotFoundError> {
         trace!("alter node {node_id} metadata for key `{key}`");
-        self.ensure_node_exists(node_id)?;
 
         if let Some(last_op) = self.current_change_mut() {
             if flatten {
@@ -345,18 +358,8 @@ impl WorkSessionProject {
             }
         }
 
-        let stub = ChangeOpStub::AlterNodeMetadata { node_id, key, new };
-        let op = ChangeOp::apply(stub, self);
+        let op = ChangeOp::alter_node_metadata(self, node_id, key, new)?;
         self.changes.push_op(op);
-        Ok(())
-    }
-
-    fn ensure_node_exists(&self, node_id: canvas::Id) -> Result<(), NodeNotFoundError> {
-        trace!("Ensure node {node_id} exists");
-        self.project
-            .canvas()
-            .node(node_id)
-            .ok_or(NodeNotFoundError(node_id))?;
         Ok(())
     }
 
@@ -442,15 +445,6 @@ impl JsWorkSession {
         }
 
         todo!()
-    }
-
-    /// Set a callback to be called when the state of the work session changes.
-    /// This includes interruptions in network connection, background validation run,
-    /// background downloads, etc.
-    #[wasm_bindgen(setter, js_name = onStateChange)]
-    pub fn set_on_state_change(&mut self, f: js_sys::Function) {
-        let mut ws = wsw!();
-        ws.on_state_change = Some(f);
     }
 }
 
@@ -640,13 +634,12 @@ impl ChangeStack {
         }
     }
 
-    pub fn push_op(&mut self, op: ChangeOp) {
+    pub fn push_op(&mut self, op: impl Into<ChangeOp>) {
+        // Discard all changes after the current position.
+        // There can be some if we had "undone".
         self.stack.truncate(self.pos);
-        self.stack.push(ChangeItem {
-            timestamp: SystemTime::now(),
-            op,
-            meta: JsValue::UNDEFINED,
-        });
+
+        self.stack.push(ChangeItem::new(op.into()));
         self.pos += 1;
     }
 }
@@ -682,6 +675,14 @@ pub struct ChangeItem {
 }
 
 impl ChangeItem {
+    pub fn new(op: ChangeOp) -> Self {
+        Self {
+            timestamp: SystemTime::now(),
+            op,
+            meta: JsValue::UNDEFINED,
+        }
+    }
+
     /// Get the timestamp of the change in microseconds since UNIX epoch.
     pub fn micros_since_unix(&self) -> u128 {
         self.timestamp
@@ -691,243 +692,10 @@ impl ChangeItem {
     }
 
     /// Replace the change with the given one, and update the timestamp.
+    ///
+    /// This effectively changes all but the [meta](ChangeItem::meta) of the change item.
     fn replace_change(&mut self, op: ChangeOp) {
         self.op = op;
         self.timestamp = SystemTime::now();
-    }
-}
-
-/// Change operation stub, that can be used to execute actual change operation,
-/// which than will record all necessary information to the history stack.
-#[derive(Debug, Clone)]
-pub enum ChangeOpStub {
-    AddNode {
-        stub: Box<canvas::NodeStub>,
-    },
-    RemoveNode {
-        id: canvas::Id,
-    },
-    AddEdge {
-        edge: canvas::Edge,
-    },
-    RemoveEdge {
-        edge: canvas::Edge,
-    },
-    AlterNodeMetadata {
-        node_id: canvas::Id,
-        key: JsString,
-        new: JsValue,
-    },
-    AlterProjectMetadata {
-        key: JsString,
-        new: JsValue,
-    },
-}
-
-/// Single change operation that was performed on the project.
-/// This record allows to revert the existing change.
-/// This is the smallest unit of action recordable in [ChangeItem].
-#[derive(Debug, Clone)]
-pub enum ChangeOp {
-    /// Add a node to the canvas.
-    AddNode {
-        stub: Box<canvas::NodeStub>,
-        id: canvas::Id,
-    },
-
-    /// Remove a node from the canvas.
-    RemoveNode {
-        removed_edges: Vec<canvas::Edge>,
-        stub: Box<canvas::NodeStub>,
-        meta: Metadata,
-        id: canvas::Id,
-    },
-
-    /// Add an edge to the canvas.
-    AddEdge { edge: canvas::Edge },
-
-    /// Remove an edge from the canvas.
-    RemoveEdge { edge: canvas::Edge },
-
-    /// Alter metadata of a node.
-    AlterNodeMetadata {
-        /// Node in which the metadata was changed.
-        node_id: canvas::Id,
-
-        /// A key to the metadata that was changed.
-        key: JsString,
-
-        /// New value assigned.
-        new: JsValue,
-
-        /// Backup of the previous metadata value.
-        backup: JsValue,
-    },
-
-    /// Alter metadata of the project.
-    AlterProjectMetadata {
-        /// A key to the metadata that was changed.
-        key: JsString,
-
-        /// New value assigned.
-        new: JsValue,
-
-        /// Backup of the previous metadata value.
-        backup: JsValue,
-    },
-}
-
-impl ChangeOp {
-    /// Apply the change operation to the project, returning the resulting actual
-    /// operation. Note that the operation can be different (with different params)
-    /// than the original one, e.g. ID of the new node can change.
-    ///
-    /// # Panic
-    /// This method panics if the operation cannot be applied, which cannot
-    /// happen if the operation was recorded correctly and when all changes are
-    /// tracked correctly.
-    fn apply(change_op_stub: ChangeOpStub, project: &mut WorkSessionProject) -> ChangeOp {
-        use ChangeOp::*;
-        use ChangeOpStub as S;
-
-        const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
-        const EXPECT_FOUND_EDGE: &str = "edge not found, though operation was recorded";
-
-        match change_op_stub {
-            S::AddNode { stub } => {
-                let id = project
-                    .project
-                    .canvas_mut()
-                    .add_node(stub.as_ref().clone(), Default::default());
-                AddNode { stub, id }
-            }
-            S::RemoveNode { id } => {
-                let (node, removed_edges) = project
-                    .project
-                    .canvas_mut()
-                    .remove_node(id)
-                    .expect(EXPECT_FOUND_NODE);
-
-                RemoveNode {
-                    removed_edges,
-                    stub: Box::new(node.stub),
-                    meta: node.meta,
-                    id,
-                }
-            }
-            S::AddEdge { edge } => {
-                project
-                    .project
-                    .canvas_mut()
-                    .add_edge(edge)
-                    .expect(EXPECT_FOUND_EDGE);
-                AddEdge { edge }
-            }
-            S::RemoveEdge { edge } => {
-                project
-                    .project
-                    .canvas_mut()
-                    .remove_edge(edge)
-                    .expect(EXPECT_FOUND_EDGE);
-                RemoveEdge { edge }
-            }
-            S::AlterNodeMetadata { node_id, key, new } => {
-                let meta = &mut project
-                    .project
-                    .canvas_mut()
-                    .node_mut(node_id)
-                    .expect(EXPECT_FOUND_NODE)
-                    .meta;
-                let backup = meta
-                    .insert(key.clone().into(), new.clone())
-                    .unwrap_or(JsValue::UNDEFINED);
-
-                AlterNodeMetadata {
-                    node_id,
-                    key,
-                    new,
-                    backup,
-                }
-            }
-            S::AlterProjectMetadata { key, new } => {
-                let meta = &mut project.project.meta;
-                let backup = meta
-                    .insert(key.clone().into(), new.clone())
-                    .unwrap_or(JsValue::UNDEFINED);
-
-                AlterProjectMetadata { key, new, backup }
-            }
-        }
-    }
-
-    /// Revert the change operation from the project.
-    /// This is the opposite of [ChangeOp::apply].
-    fn revert(self, project: &mut WorkSessionProject) {
-        use ChangeOp::*;
-
-        const EXPECT_FOUND_NODE: &str = "node not found, though operation was recorded";
-        const EXPECT_FOUND_EDGE: &str = "edge not found, though operation was recorded";
-
-        match self {
-            AddNode { id, .. } => {
-                project
-                    .project
-                    .canvas_mut()
-                    .remove_node(id)
-                    .expect(EXPECT_FOUND_NODE);
-            }
-            RemoveNode {
-                removed_edges,
-                stub,
-                meta,
-                id: _,
-            } => {
-                project.project.canvas_mut().add_node(*stub, meta);
-
-                for edge in removed_edges {
-                    project
-                        .project
-                        .canvas_mut()
-                        .add_edge(edge)
-                        .expect(EXPECT_FOUND_EDGE);
-                }
-            }
-            AddEdge { edge } => {
-                project
-                    .project
-                    .canvas_mut()
-                    .remove_edge(edge)
-                    .expect(EXPECT_FOUND_EDGE);
-            }
-            RemoveEdge { edge } => {
-                project
-                    .project
-                    .canvas_mut()
-                    .add_edge(edge)
-                    .expect(EXPECT_FOUND_EDGE);
-            }
-            AlterNodeMetadata {
-                node_id,
-                key,
-                new: _,
-                backup,
-            } => {
-                let meta = &mut project
-                    .project
-                    .canvas_mut()
-                    .node_mut(node_id)
-                    .expect(EXPECT_FOUND_NODE)
-                    .meta;
-                meta.insert(key.into(), backup);
-            }
-            AlterProjectMetadata {
-                key,
-                new: _,
-                backup,
-            } => {
-                let meta = &mut project.project.meta;
-                meta.insert(key.into(), backup);
-            }
-        }
     }
 }
