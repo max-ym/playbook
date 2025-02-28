@@ -247,7 +247,6 @@ pub(crate) trait ProjectHandle {
 
     /// Check the validity of the handle and then proceed with the given function.
     /// If the project is not found, this will return an [ProjectNotFoundError].
-    #[track_caller]
     fn checked_write<T>(
         &self,
         f: impl FnOnce(&mut WorkSessionProject) -> Result<T, JsError>,
@@ -269,7 +268,6 @@ pub(crate) trait ProjectHandle {
 
     /// Check the validity of the handle and then proceed with the given function.
     /// If the project is not found, this will return an [ProjectNotFoundError].
-    #[track_caller]
     fn checked_read<T>(
         &self,
         f: impl FnOnce(&WorkSessionProject) -> Result<T, JsError>,
