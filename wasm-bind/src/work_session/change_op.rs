@@ -54,9 +54,8 @@ pub enum ChangeOp {
 }
 
 impl ChangeOp {
-    /// Apply the change operation to the project, returning the resulting actual
-    /// operation. Note that the operation can be different (with different params)
-    /// than the original one, e.g. ID of the new node can change.
+    /// Apply this change operation to the project, updating the operation
+    /// with altered new values (like new ID for a node).
     ///
     /// # Panic
     /// This method panics if the operation cannot be applied, which cannot
