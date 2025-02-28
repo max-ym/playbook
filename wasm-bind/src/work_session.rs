@@ -8,7 +8,7 @@ use log::{debug, error, trace, warn};
 use smallvec::SmallVec;
 use uuid::Uuid;
 
-use crate::project::{Metadata, Project, ProjectHandle};
+use crate::project::{JsMeta, Metadata, Project, ProjectHandle};
 use crate::*;
 
 /// Change operations that can be performed on the project.
@@ -640,7 +640,49 @@ impl ProjectHandle for JsChangeItemMeta {
     }
 }
 
-impl_meta!(JsChangeItemMeta, ChangeOpMeta);
+impl JsChangeItemMeta {
+    fn read<'p>(this: &JsChangeItemMeta, ws: &'p WorkSessionProject) -> Option<&'p Metadata> {
+        if !this.inner_validation() {
+            return None;
+        }
+
+        ws.change_at(this.checkout.pos).map(|c| &c.meta)
+    }
+
+    fn write<'p>(
+        this: &JsChangeItemMeta,
+        ws: &'p mut WorkSessionProject,
+    ) -> Option<&'p mut Metadata> {
+        if !this.inner_validation() {
+            return None;
+        }
+
+        ws.change_at_mut(this.checkout.pos).map(|c| &mut c.meta)
+    }
+}
+
+impl JsMeta for JsChangeItemMeta {
+    fn meta<T>(&self, f: impl FnOnce(&Metadata) -> Result<T, JsError>) -> Result<T, JsError> {
+        self.checked_read(|project| {
+            JsChangeItemMeta::read(self, project).map_or_else(
+                || Err(JsError::new("Change item meta is invalid")),
+                |meta| f(meta),
+            )
+        })
+    }
+
+    fn meta_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut Metadata) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        self.checked_write(|project| {
+            JsChangeItemMeta::write(self, project).map_or_else(
+                || Err(JsError::new("Change item meta is invalid")),
+                |meta| f(meta),
+            )
+        })
+    }
+}
 
 /// Error when trying to access an uninitialized or incorrectly initialized work session.
 #[wasm_bindgen(js_name = WorkSessionUninitError)]

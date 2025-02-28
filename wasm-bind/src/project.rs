@@ -746,62 +746,76 @@ impl ProjectHandle for JsProjectMeta {
     }
 }
 
-#[macro_export]
-macro_rules! impl_meta {
-    ($name:ident, $js_name:ident) => {
-        #[wasm_bindgen(js_class = $js_name)]
-        impl $name {
-            /// Get the value associated with the given key.
-            pub fn get(&self, key: JsString) -> Result<JsValue, JsError> {
-                self.checked_read(|project| {
-                    Ok(project
-                        .meta
-                        .get(&key.into())
-                        .cloned()
-                        .unwrap_or(JsValue::UNDEFINED)
-                        .into())
-                })
-            }
+/// JavaScript metadata trait. So that to conform to a single interface to reuse
+/// in similar structures.
+pub trait JsMeta {
+    /// Execute given closure over the reference to the metadata.
+    fn meta<T>(&self, f: impl FnOnce(&Metadata) -> Result<T, JsError>) -> Result<T, JsError>;
 
-            /// Set the value associated with the given key, removing the old value if it exists.
-            /// Returns the removed value that was assigned beforehand (if any).
-            pub fn set(&self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
-                self.checked_write(|project| {
-                    Ok(project
-                        .meta
-                        .insert(key.into(), value.into())
-                        .unwrap_or(JsValue::UNDEFINED)
-                        .into())
-                })
-            }
+    /// Mutable reference to the metadata associated with the object.
+    fn meta_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut Metadata) -> Result<T, JsError>,
+    ) -> Result<T, JsError>;
 
-            /// Remove the value associated with the given key. Returns the value that was removed,
-            /// if it was assigned beforehand.
-            #[wasm_bindgen(js_name = remove)]
-            pub fn remove(&self, key: JsString) -> Result<JsValue, JsError> {
-                self.checked_write(|project| {
-                    Ok(project
-                        .meta
-                        .remove(&key.into())
-                        .unwrap_or(JsValue::UNDEFINED)
-                        .into())
-                })
-            }
+    /// Get the value associated with the given key.
+    fn get(&self, key: JsString) -> Result<JsValue, JsError> {
+        self.meta(|meta| Ok(meta.get(&key.into()).cloned().unwrap_or(JsValue::UNDEFINED)))
+    }
 
-            /// Get the keys of the metadata.
-            #[wasm_bindgen(js_name = keys)]
-            pub fn keys(&self) -> Result<Vec<JsString>, JsError> {
-                self.checked_read(|project| {
-                    Ok(project.meta.keys().cloned().map(Into::into).collect())
-                })
-            }
-        }
-    };
+    /// Set the value associated with the given key, removing the old value if it exists.
+    /// Returns the removed value that was assigned beforehand (if any).
+    fn set(&mut self, key: JsString, value: JsValue) -> Result<JsValue, JsError> {
+        self.meta_mut(|meta| {
+            Ok(meta
+                .insert(key.into(), value.into())
+                .unwrap_or(JsValue::UNDEFINED)
+                .into())
+        })
+    }
+
+    /// Remove the value associated with the given key. Returns the value that was removed,
+    /// if it was assigned beforehand.
+    fn remove(&mut self, key: JsString) -> Result<JsValue, JsError> {
+        self.meta_mut(|meta| {
+            Ok(meta
+                .remove(&key.into())
+                .unwrap_or(JsValue::UNDEFINED)
+                .into())
+        })
+    }
+
+    /// Get the keys of the metadata.
+    fn keys(&self) -> Result<Vec<JsString>, JsError> {
+        self.meta(|meta| Ok(meta.keys().cloned().map(Into::into).collect()))
+    }
 }
-pub use impl_meta;
 
-impl_meta!(JsProjectMeta, ProjectMeta);
-impl_meta!(JsNodeMeta, NodeMeta);
+impl JsMeta for JsNodeMeta {
+    fn meta<T>(&self, f: impl FnOnce(&Metadata) -> Result<T, JsError>) -> Result<T, JsError> {
+        self.checked_node_read(|node| f(&node.meta))
+    }
+
+    fn meta_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut Metadata) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        self.ensure_node_write(|node| f(&mut node.meta))
+    }
+}
+
+impl JsMeta for JsProjectMeta {
+    fn meta<T>(&self, f: impl FnOnce(&Metadata) -> Result<T, JsError>) -> Result<T, JsError> {
+        self.checked_write(|project| f(&project.meta))
+    }
+
+    fn meta_mut<T>(
+        &mut self,
+        f: impl FnOnce(&mut Metadata) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        self.checked_write(|project| f(&mut project.meta))
+    }
+}
 
 /// Kind of the data type.
 #[derive(Debug, Clone, Copy)]
