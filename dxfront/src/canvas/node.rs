@@ -1,12 +1,18 @@
 use core::fmt;
 use std::borrow::Cow;
 
-use dioxus::html::geometry::{
-    Pixels,
-    euclid::{Length, Point2D, Size2D},
+use dioxus::html::{
+    geometry::{
+        Pixels,
+        euclid::{Length, Point2D, Size2D},
+    },
+    input_data::MouseButton,
 };
 
-use crate::*;
+use crate::{
+    canvas::{CANVAS_DRAG, CanvasDrag},
+    *,
+};
 
 use super::{GridUnit, GridUnitConvert};
 
@@ -15,8 +21,22 @@ pub fn Node(cfg: CfgAndOffset) -> Element {
     let offset = cfg.offset;
     let cfg = cfg.cfg;
 
+    let offset = use_signal(|| CanvasDrag::new(offset));
+    let mouse_down = move |e: Event<MouseData>| {
+        let is_primary = e.data().trigger_button() == Some(MouseButton::Primary);
+        if !is_primary {
+            return;
+        }
+        e.prevent_default();
+
+        CanvasDrag::track_new(offset);
+    };
+
+    let offset = offset.read().element_offset;
     rsx! {
         div {
+            onmousedown: mouse_down,
+
             position: "absolute",
             top: "{offset.y}px",
             left: "{offset.x}px",
