@@ -223,17 +223,17 @@ pub fn Canvas() -> Element {
 
     // Track mouse movements.
     let mouse_move = move |e: Event<MouseData>| {
-        let coords = e.client_coordinates().cast_unit();
+        let cur_pos = e.client_coordinates().cast_unit();
         let is_middle_trigger = e.held_buttons() == EnumSet::only(MouseButton::Auxiliary);
 
         if is_middle_trigger {
-            let last = Shift::from_point(*last_mouse_pos.read());
+            let last_pos = *last_mouse_pos.read();
             shift.with_mut(|shift| {
-                *shift += (coords - last.point).to_point();
+                *shift += (cur_pos - last_pos).to_point();
             })
         }
 
-        last_mouse_pos.set(coords);
+        last_mouse_pos.set(cur_pos);
     };
 
     let dimensions = *dimensions.read();
