@@ -1,5 +1,5 @@
 use crate::*;
-use std::ops::{self, RangeInclusive};
+use std::ops;
 
 use dioxus::html::{
     geometry::{
@@ -26,8 +26,8 @@ impl GridLines {
     pub fn calc_grid(size: Rect<f64, Pixels>) -> Self {
         const CELL_SIZE: f64 = GridLines::CELL_SIZE as _;
 
-        let hor = (size.size.height as f64 / CELL_SIZE).floor() as u32;
-        let ver = (size.size.width as f64 / CELL_SIZE).floor() as u32;
+        let hor = (size.size.height / CELL_SIZE).floor() as u32;
+        let ver = (size.size.width / CELL_SIZE).floor() as u32;
 
         trace!("Calculated grid ranges: {hor:#?}, {ver:#?}");
 
