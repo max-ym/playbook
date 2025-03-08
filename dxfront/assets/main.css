@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+body {
+    background-color: #2d478b;
+    color: #ffffff;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 0;
+}
+
+.gridlines {
+    stroke: #685483;
+    stroke-width: 1px;
+}

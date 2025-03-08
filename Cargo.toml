@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["base", "wasm-bind"]
+members = ["base", "wasm-bind", "dxfront"]
 
 [profile.stage]
 inherits = "release"
@@ -12,3 +12,17 @@ debug-assertions = true
 [profile.stage.package.wasm-bind]
 debug = true
 debug-assertions = true
+
+[profile.stage.package.dxfront]
+debug = true
+debug-assertions = true
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"
