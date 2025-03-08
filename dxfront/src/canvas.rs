@@ -156,6 +156,8 @@ impl ops::AddAssign<Point2D<f64, Pixels>> for Shift {
 #[component]
 pub fn Grid(grid: GridLines, shift: Shift) -> Element {
     let shift = shift.wrap_to_cell();
+    let x = shift.point.x;
+    let y = shift.point.y;
 
     rsx! {
         div {
@@ -166,7 +168,7 @@ pub fn Grid(grid: GridLines, shift: Shift) -> Element {
             min_height: "100vh",
             div {
                 position: "relative",
-                transform: format!("translate({}px, {}px)", shift.point.x, shift.point.y),
+                transform: "translate({x}px, {y}px)",
                 GridSvg { grid }
             }
         }
