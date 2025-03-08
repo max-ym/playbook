@@ -121,10 +121,6 @@ impl Shift {
         Self::default()
     }
 
-    pub fn from_point(point: Point2D<f64, Pixels>) -> Self {
-        Self { point }
-    }
-
     /// Ensure that this shift is no more than a single cell, wrapping around
     /// the excess shift.
     pub fn wrap_to_cell(self) -> Self {
