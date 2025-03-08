@@ -1,11 +1,10 @@
 use dioxus::html::geometry::{
-    Pixels,
-    euclid::{Point2D, Rect},
+    euclid::{Length, Point2D, Rect}, Pixels
 };
 
-use crate::*;
+use crate::{canvas::GridUnitConvert, *};
 
-use super::Shift;
+use super::{GridUnit, Shift};
 
 /// Information about all added grid lines to the rendered canvas.
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
@@ -17,14 +16,14 @@ pub struct GridLines {
 }
 
 impl GridLines {
-    pub const CELL_SIZE: u32 = 32;
+    pub const CELL_SIZE: Length<u32, GridUnit> = Length::new(2);
 
     /// Calculate required ranges of added lines to cover all visible area.
     pub fn calc_grid(size: Rect<f64, Pixels>) -> Self {
-        const CELL_SIZE: f64 = GridLines::CELL_SIZE as _;
+        let cell_size: f64 = GridLines::CELL_SIZE.to_pixels();
 
-        let hor = (size.size.height / CELL_SIZE).floor() as u32;
-        let ver = (size.size.width / CELL_SIZE).floor() as u32;
+        let hor = (size.size.height / cell_size).floor() as u32;
+        let ver = (size.size.width / cell_size).floor() as u32;
 
         trace!("Calculated grid ranges: {hor:#?}, {ver:#?}");
 
@@ -78,7 +77,7 @@ impl Iterator for GridLinesIter {
     type Item = (Point2D<f64, Pixels>, Point2D<f64, Pixels>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        const CELL_SIZE: f64 = GridLines::CELL_SIZE as f64;
+        let cell_size: f64 = GridLines::CELL_SIZE.to_pixels();
 
         if self.is_hor {
             if self.current > self.hor as i32 {
@@ -89,16 +88,16 @@ impl Iterator for GridLinesIter {
             return None;
         }
 
-        let current = self.current as f64 * CELL_SIZE;
+        let current = self.current as f64 * cell_size;
         let points = if self.is_hor {
             (
-                Point2D::new(-CELL_SIZE, current),
-                Point2D::new(self.max_ver + CELL_SIZE, current),
+                Point2D::new(-cell_size, current),
+                Point2D::new(self.max_ver + cell_size, current),
             )
         } else {
             (
-                Point2D::new(current, -CELL_SIZE),
-                Point2D::new(current, self.max_hor + CELL_SIZE),
+                Point2D::new(current, -cell_size),
+                Point2D::new(current, self.max_hor + cell_size),
             )
         };
         self.current += 1;
@@ -110,8 +109,6 @@ impl Iterator for GridLinesIter {
 #[component]
 pub fn Grid(grid: GridLines, shift: Shift) -> Element {
     let shift = shift.wrap_to_cell();
-    let x = shift.point.x;
-    let y = shift.point.y;
 
     rsx! {
         div {
@@ -122,7 +119,7 @@ pub fn Grid(grid: GridLines, shift: Shift) -> Element {
             min_height: "100vh",
             div {
                 position: "relative",
-                transform: "translate({x}px, {y}px)",
+                transform: "{shift}",
                 GridSvg { grid }
             }
         }

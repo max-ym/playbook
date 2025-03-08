@@ -2,12 +2,51 @@
 
 body {
     background-color: #2d478b;
-    color: #ffffff;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    color: #1d0847;
+    font-family: 'Roboto', Tahoma, Geneva, Verdana, sans-serif;
     margin: 0;
 }
 
 .gridlines {
     stroke: #685483;
     stroke-width: 1px;
+}
+
+.node {
+    border-radius: 5px;
+    border-width: 2px;
+    border-color: #1d182d;
+    border-style: solid;
+
+    text-align: center;
+    vertical-align: middle;
+    font-size: 16px;
+}
+
+.node-input {
+    background-color: #6663a2;
+}
+
+.node-output {
+    background-color: #2d478b;
+}
+
+.node-comment {
+    background-color: #fff;
+}
+
+.node-warning {
+    background-color: #87a980;
+}
+
+.node-process {
+    background-color: #fdd0a2;
+}
+
+.pin {
+    background-color: #1d0847;
+    border-radius: 2px;
+    border-width: 1px;
+    border-color: #1d182d;
+    border-style: solid;
 }
