@@ -23,7 +23,6 @@ use grid::*;
 
 mod node;
 use node::*;
-use tracing::debug;
 
 /// Global variable to pass the element that was pressed on on the canvas.
 static CANVAS_DRAG: Global<Signal<CanvasDrag>, CanvasDrag> = Signal::global(CanvasDrag::zero);
@@ -32,6 +31,7 @@ static CANVAS_DRAG: Global<Signal<CanvasDrag>, CanvasDrag> = Signal::global(Canv
 struct CanvasDrag {
     element_offset: Point2D<f64, Pixels>,
     mouse_pos: Option<Point2D<f64, Pixels>>,
+    is_tracked: bool,
 }
 
 impl CanvasDrag {
@@ -39,6 +39,7 @@ impl CanvasDrag {
         Self {
             element_offset: Point2D::zero(),
             mouse_pos: None,
+            is_tracked: false,
         }
     }
 
@@ -47,23 +48,24 @@ impl CanvasDrag {
         Self {
             element_offset,
             mouse_pos: None,
+            is_tracked: false,
         }
     }
 
     /// Track element's offset.
     /// The element will be moved when the mouse is dragged.
     pub fn track_new(offset: Signal<Self>) {
-        Self::new(offset.read().element_offset).track(offset)
+        let element_offset = offset.read().element_offset;
+        Self::new(element_offset).track(offset)
     }
 
     /// Begin tracking the element. All future drag events will be applied to this element,
     /// this change will be propagated to the listeners of the provided signal.
-    pub fn track(self, child_sig: Signal<CanvasDrag>) {
+    pub fn track(mut self, child_sig: Signal<CanvasDrag>) {
+        self.is_tracked = true;
         let mut sig = CANVAS_DRAG.resolve();
-        sig.with_mut(|old| {
-            *old = self;
-        });
         let _ = sig.point_to(child_sig);
+        *sig.write() = self;
     }
 
     /// Register new mouse movement and update the offset of the element accordingly.
@@ -79,8 +81,15 @@ impl CanvasDrag {
         let mut sig = CANVAS_DRAG.resolve();
         sig.with_mut(|d| {
             d.mouse_pos = None; // So that the next drag event doesn't jerk the element.
+            d.is_tracked = false;
         });
         let _ = sig.point_to(Signal::new(CanvasDrag::zero()));
+    }
+
+    /// Whether any element is being tracked.
+    pub fn has_tracking() -> bool {
+        let sig = CANVAS_DRAG.resolve();
+        sig.read().is_tracked
     }
 }
 
@@ -130,7 +139,7 @@ pub fn Canvas() -> Element {
     // with middle mouse button.
     let mut last_mouse_pos = use_signal(Point2D::zero);
 
-    let mut cursor = use_signal(|| "pointer");
+    let mut cursor = use_signal(|| "default");
 
     // Update the dimensions of the canvas to accomodate for window resizing.
     let update_dims = move |_| async move {
@@ -167,11 +176,9 @@ pub fn Canvas() -> Element {
 
     let mouse_up = move |e: Event<MouseData>| {
         let is_primary = e.data().trigger_button() == Some(MouseButton::Primary);
-        let is_middle = e.data().trigger_button() == Some(MouseButton::Auxiliary);
 
-        if is_middle {
-            *cursor.write() = "pointer";
-        } else if is_primary {
+        *cursor.write() = "default";
+        if is_primary {
             CanvasDrag::untrack();
         }
     };
@@ -181,11 +188,17 @@ pub fn Canvas() -> Element {
         let is_middle_trigger = e.held_buttons() == EnumSet::only(MouseButton::Auxiliary);
 
         *cursor.write() = if is_middle_trigger {
-            "grabbing"
+            "move"
         } else {
             return;
         };
     };
+
+    use_effect(move || {
+        if CanvasDrag::has_tracking() {
+            *cursor.write() = "grabbing";
+        }
+    });
 
     let dimensions = *dimensions.read();
     let shift = *shift.read();
