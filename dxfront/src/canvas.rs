@@ -77,6 +77,7 @@ impl GridLinesIter {
 }
 
 impl Iterator for GridLinesIter {
+    // Starting and ending points of a line.
     type Item = (Point2D<f64, Pixels>, Point2D<f64, Pixels>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -92,20 +93,20 @@ impl Iterator for GridLinesIter {
         }
 
         let current = self.current as f64 * CELL_SIZE;
-
-        let start = if self.is_hor {
-            Point2D::new(-CELL_SIZE, current)
+        let points = if self.is_hor {
+            (
+                Point2D::new(-CELL_SIZE, current),
+                Point2D::new(self.max_ver, current),
+            )
         } else {
-            Point2D::new(current, -CELL_SIZE)
+            (
+                Point2D::new(current, -CELL_SIZE),
+                Point2D::new(current, self.max_hor),
+            )
         };
-        let end = if self.is_hor {
-            Point2D::new(self.max_ver, current)
-        } else {
-            Point2D::new(current, self.max_hor)
-        };
-
         self.current += 1;
-        Some((start, end))
+
+        Some(points)
     }
 }
 
