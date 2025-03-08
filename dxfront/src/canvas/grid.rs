@@ -93,12 +93,12 @@ impl Iterator for GridLinesIter {
         let points = if self.is_hor {
             (
                 Point2D::new(-CELL_SIZE, current),
-                Point2D::new(self.max_ver, current),
+                Point2D::new(self.max_ver + CELL_SIZE, current),
             )
         } else {
             (
                 Point2D::new(current, -CELL_SIZE),
-                Point2D::new(current, self.max_hor),
+                Point2D::new(current, self.max_hor + CELL_SIZE),
             )
         };
         self.current += 1;
