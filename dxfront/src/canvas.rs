@@ -1,19 +1,12 @@
 use crate::*;
-use std::{
-    cell::RefCell,
-    fmt, ops,
-    sync::{Arc, Mutex, mpsc},
-};
+use std::{fmt, ops, sync::atomic::AtomicU32};
 
-use dioxus::{
-    html::{
-        geometry::{
-            Pixels,
-            euclid::{Length, Point2D, Rect},
-        },
-        input_data::MouseButton,
+use dioxus::html::{
+    geometry::{
+        Pixels,
+        euclid::{Length, Point2D, Rect},
     },
-    web::WebEventExt,
+    input_data::MouseButton,
 };
 use enumset::EnumSet;
 
@@ -26,6 +19,12 @@ use node::*;
 
 /// Global variable to pass the element that was pressed on on the canvas.
 static CANVAS_DRAG: Global<Signal<CanvasDrag>, CanvasDrag> = Signal::global(CanvasDrag::zero);
+
+static NEXT_Z_INDEX: AtomicU32 = AtomicU32::new(0);
+
+fn next_z_index() -> u32 {
+    NEXT_Z_INDEX.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CanvasDrag {

@@ -10,7 +10,7 @@ use dioxus::html::{
 };
 
 use crate::{
-    canvas::{CANVAS_DRAG, CanvasDrag},
+    canvas::{CanvasDrag, next_z_index},
     *,
 };
 
@@ -21,6 +21,8 @@ pub fn Node(cfg: CfgAndOffset) -> Element {
     let offset = cfg.offset;
     let cfg = cfg.cfg;
 
+    let mut z_index = use_signal(|| next_z_index());
+
     let offset = use_signal(|| CanvasDrag::new(offset));
     let mouse_down = move |e: Event<MouseData>| {
         let is_primary = e.data().trigger_button() == Some(MouseButton::Primary);
@@ -29,6 +31,7 @@ pub fn Node(cfg: CfgAndOffset) -> Element {
         }
         e.prevent_default();
 
+        *z_index.write() = next_z_index();
         CanvasDrag::track_new(offset);
     };
 
@@ -37,6 +40,7 @@ pub fn Node(cfg: CfgAndOffset) -> Element {
         div {
             onmousedown: mouse_down,
 
+            z_index: z_index,
             position: "absolute",
             top: "{offset.y}px",
             left: "{offset.x}px",
