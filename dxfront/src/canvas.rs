@@ -203,10 +203,7 @@ pub fn Canvas() -> Element {
     let shift = *shift.read();
     rsx! {
         div {
-            onmounted: move |cx| {
-                div.set(Some(cx.data()));
-
-            },
+            onmounted: move |cx| div.set(Some(cx.data())),
             onresize: move |e| update_dims(e.get_content_box_size()),
             onmousemove: mouse_move,
             onmouseup: mouse_up,
