@@ -20,6 +20,9 @@ use node::*;
 /// Global variable to pass the element that was pressed on on the canvas.
 static CANVAS_DRAG: Global<Signal<CanvasDrag>, CanvasDrag> = Signal::global(CanvasDrag::zero);
 
+/// Next z-index to be used for the next element that is pressed on or added to the canvas.
+/// Each move updates the z-index to the new highest value, so that this element is always
+/// on top of all other elements.
 static NEXT_Z_INDEX: AtomicU32 = AtomicU32::new(0);
 
 fn next_z_index() -> u32 {
