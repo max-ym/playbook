@@ -25,6 +25,7 @@ static CANVAS_DRAG: Global<Signal<CanvasDrag>, CanvasDrag> = Signal::global(Canv
 /// on top of all other elements.
 static NEXT_Z_INDEX: AtomicU32 = AtomicU32::new(0);
 
+/// [NEXT_Z_INDEX] is incremented by 1 and the new value is returned.
 fn next_z_index() -> u32 {
     NEXT_Z_INDEX.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
 }
