@@ -1,10 +1,13 @@
 use crate::*;
-use std::{fmt, ops, sync::atomic::AtomicU32};
+use std::{
+    fmt, ops,
+    sync::{OnceLock, RwLock, atomic::AtomicU32},
+};
 
 use dioxus::html::{
     geometry::{
         Pixels,
-        euclid::{Length, Point2D, Rect},
+        euclid::{Length, Point2D, Rect, Vector2D},
     },
     input_data::MouseButton,
 };
@@ -35,6 +38,7 @@ struct CanvasDrag {
     element_offset: Point2D<f64, Pixels>,
     mouse_pos: Option<Point2D<f64, Pixels>>,
     is_tracked: bool,
+    orig_z_index: u32,
 }
 
 impl CanvasDrag {
@@ -43,23 +47,28 @@ impl CanvasDrag {
             element_offset: Point2D::zero(),
             mouse_pos: None,
             is_tracked: false,
+            orig_z_index: u32::MAX,
         }
     }
 
     /// Create a new untracked offset for an element.
-    pub fn new(element_offset: Point2D<f64, Pixels>) -> Self {
+    pub fn new(element_offset: Point2D<f64, Pixels>, orig_z_index: u32) -> Self {
         Self {
             element_offset,
             mouse_pos: None,
             is_tracked: false,
+            orig_z_index,
         }
     }
 
     /// Track element's offset.
     /// The element will be moved when the mouse is dragged.
     pub fn track_new(offset: Signal<Self>) {
-        let element_offset = offset.read().element_offset;
-        Self::new(element_offset).track(offset)
+        let (element_offset, orig_z_index) = {
+            let read = offset.read();
+            (read.element_offset, read.orig_z_index)
+        };
+        Self::new(element_offset, orig_z_index).track(offset)
     }
 
     /// Begin tracking the element. All future drag events will be applied to this element,
@@ -77,6 +86,9 @@ impl CanvasDrag {
         self.mouse_pos = Some(mouse_pos);
         let diff = mouse_pos - old;
         self.element_offset += diff;
+
+        // Update lines.
+        node::notify_moved(self.orig_z_index, diff);
     }
 
     /// Remove all tracking of any element.
@@ -227,28 +239,28 @@ pub fn Canvas() -> Element {
 
 #[component]
 pub fn Nodes(shift: Shift) -> Element {
-    let n1 = Cfg {
+    let n1 = CfgInner {
         inputs: 0,
         outputs: 1,
         icon: Icon::Process,
         class: Class::Input,
         label: "Person Record".into(),
     };
-    let n2 = Cfg {
+    let n2 = CfgInner {
         inputs: 3,
         outputs: 3,
         icon: Icon::Process,
         class: Class::Process,
         label: "Dummy Node".into(),
     };
-    let n3 = Cfg {
+    let n3 = CfgInner {
         inputs: 2,
         outputs: 4,
         icon: Icon::Comment,
         class: Class::Comment,
         label: "Dummy Node".into(),
     };
-    let n4 = Cfg {
+    let n4 = CfgInner {
         inputs: 1,
         outputs: 0,
         icon: Icon::Output,
@@ -262,24 +274,28 @@ pub fn Nodes(shift: Shift) -> Element {
     let off3 = Point2D::new(unit * 40.0, unit * 2.0);
     let off4 = Point2D::new(unit * 30.0, unit * 15.0);
 
-    let n1 = CfgAndOffset {
+    let n1 = Cfg {
         cfg: n1,
         offset: off1,
+        orig_z_index: next_z_index(),
     };
-    let n2 = CfgAndOffset {
+    let n2 = Cfg {
         cfg: n2,
         offset: off2,
+        orig_z_index: next_z_index(),
     };
-    let n3 = CfgAndOffset {
+    let n3 = Cfg {
         cfg: n3,
         offset: off3,
+        orig_z_index: next_z_index(),
     };
-    let n4 = CfgAndOffset {
+    let n4 = Cfg {
         cfg: n4,
         offset: off4,
+        orig_z_index: next_z_index(),
     };
 
-    let conn1 = Cfg::connect_pins(&n1, &n2, 0, 0);
+    let conn1 = CfgInner::connect_pins(&n1, &n2, 0, 0);
 
     rsx! {
         div {
