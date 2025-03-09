@@ -76,7 +76,7 @@ impl CanvasDrag {
     }
 
     /// Remove all tracking of any element.
-    pub fn untrack() {
+    pub fn unlink() {
         let mut sig = CANVAS_DRAG.resolve();
         sig.with_mut(|d| {
             d.mouse_pos = None; // So that the next drag event doesn't jerk the element.
@@ -178,7 +178,7 @@ pub fn Canvas() -> Element {
 
         *cursor.write() = "default";
         if is_primary {
-            CanvasDrag::untrack();
+            CanvasDrag::unlink();
         }
     };
 
