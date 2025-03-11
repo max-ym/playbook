@@ -1,7 +1,11 @@
 use crate::*;
 use std::{
+    cell::RefCell,
     fmt, ops,
-    sync::{OnceLock, RwLock, atomic::AtomicU32},
+    sync::{
+        OnceLock, RwLock,
+        atomic::{self, AtomicU32},
+    },
 };
 
 use dioxus::html::{
@@ -18,93 +22,71 @@ mod grid;
 use grid::*;
 
 mod node;
+use hashbrown::HashMap;
 use node::*;
+use tracing::debug;
 
-/// Global variable to pass the element that was pressed on on the canvas.
-static CANVAS_DRAG: Global<Signal<CanvasDrag>, CanvasDrag> = Signal::global(CanvasDrag::zero);
+/// Pool of IDs to uniquely identify new elements being added to the canvas.
+/// IDs start from 1.
+/// Zero ID indicates uninitialized state.
+static NEXT_ID: AtomicId = AtomicId::one();
 
-/// Next z-index to be used for the next element that is pressed on or added to the canvas.
-/// Each move updates the z-index to the new highest value, so that this element is always
-/// on top of all other elements.
-static NEXT_Z_INDEX: AtomicU32 = AtomicU32::new(0);
+/// ID of the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Id(u32);
 
-/// [NEXT_Z_INDEX] is incremented by 1 and the new value is returned.
-fn next_z_index() -> u32 {
-    NEXT_Z_INDEX.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+#[derive(Debug)]
+struct AtomicId(AtomicU32);
+
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct CanvasDrag {
-    element_offset: Point2D<f64, Pixels>,
-    mouse_pos: Option<Point2D<f64, Pixels>>,
-    is_tracked: bool,
-    orig_z_index: u32,
+impl Id {
+    /// [NEXT_ID] is incremented by 1 and the new value is returned.
+    /// New nodes added to the canvas get their IDs as z-indexes.
+    /// This effectively allows for new nodes to be on top of the older ones
+    /// after they are added.
+    fn next() -> Self {
+        let id = NEXT_ID.0.fetch_add(1, atomic::Ordering::AcqRel);
+        Self(id)
+    }
+
+    pub const fn uninit() -> Self {
+        Self::zero()
+    }
+
+    pub const fn zero() -> Self {
+        Id(0)
+    }
+
+    pub const fn is_uninit(self) -> bool {
+        self.0 == Self::uninit().0
+    }
+
+    /// Return this object if it is a valid ID.
+    pub fn only_valid(self) -> Option<Id> {
+        (self != Self::uninit()).then_some(self)
+    }
 }
 
-impl CanvasDrag {
-    pub fn zero() -> Self {
-        Self {
-            element_offset: Point2D::zero(),
-            mouse_pos: None,
-            is_tracked: false,
-            orig_z_index: u32::MAX,
-        }
+impl From<Id> for u32 {
+    fn from(id: Id) -> u32 {
+        id.0
     }
+}
 
-    /// Create a new untracked offset for an element.
-    pub fn new(element_offset: Point2D<f64, Pixels>, orig_z_index: u32) -> Self {
-        Self {
-            element_offset,
-            mouse_pos: None,
-            is_tracked: false,
-            orig_z_index,
-        }
+impl AtomicId {
+    pub const fn one() -> Self {
+        Self(AtomicU32::new(1))
     }
+}
 
-    /// Track element's offset.
-    /// The element will be moved when the mouse is dragged.
-    pub fn track_new(offset: Signal<Self>) {
-        let (element_offset, orig_z_index) = {
-            let read = offset.read();
-            (read.element_offset, read.orig_z_index)
-        };
-        Self::new(element_offset, orig_z_index).track(offset)
-    }
-
-    /// Begin tracking the element. All future drag events will be applied to this element,
-    /// this change will be propagated to the listeners of the provided signal.
-    pub fn track(mut self, child_sig: Signal<CanvasDrag>) {
-        self.is_tracked = true;
-        let mut sig = CANVAS_DRAG.resolve();
-        let _ = sig.point_to(child_sig);
-        *sig.write() = self;
-    }
-
-    /// Register new mouse movement and update the offset of the element accordingly.
-    pub fn update(&mut self, mouse_pos: Point2D<f64, Pixels>) {
-        let old = self.mouse_pos.unwrap_or(mouse_pos);
-        self.mouse_pos = Some(mouse_pos);
-        let diff = mouse_pos - old;
-        self.element_offset += diff;
-
-        // Update lines.
-        node::notify_moved(self.orig_z_index, diff);
-    }
-
-    /// Remove all tracking of any element.
-    pub fn unlink() {
-        let mut sig = CANVAS_DRAG.resolve();
-        sig.with_mut(|d| {
-            d.mouse_pos = None; // So that the next drag event doesn't jerk the element.
-            d.is_tracked = false;
-        });
-        let _ = sig.point_to(Signal::new(CanvasDrag::zero()));
-    }
-
-    /// Whether any element is being tracked.
-    pub fn has_tracking() -> bool {
-        let sig = CANVAS_DRAG.resolve();
-        sig.read().is_tracked
+impl From<AtomicId> for Id {
+    fn from(id: AtomicId) -> Id {
+        Id(id.0.load(atomic::Ordering::Acquire))
     }
 }
 
@@ -150,10 +132,7 @@ pub fn Canvas() -> Element {
     // How much the canvas has been shifted.
     let mut shift = use_signal(Shift::new);
 
-    // Position of the mouse. Used to calculate the shift when shifting the canvas
-    // with middle mouse button.
-    let mut last_mouse_pos = use_signal(Point2D::zero);
-
+    // Currently set cursor type (value for CSS).
     let mut cursor = use_signal(|| "default");
 
     // Update the dimensions of the canvas to accomodate for window resizing.
@@ -168,25 +147,38 @@ pub fn Canvas() -> Element {
         }
     };
 
-    // Track mouse movements.
-    let mouse_move = move |e: Event<MouseData>| {
-        let cur_pos = e.screen_coordinates().cast_unit();
-        let is_middle_trigger = e.held_buttons() == EnumSet::only(MouseButton::Auxiliary);
-        let is_primary_trigger = e.held_buttons() == EnumSet::only(MouseButton::Primary);
+    // Tracking of the selected node for drag.
+    let mut dragged_node_id = use_signal(Id::uninit);
+    let dragged_node_cmp = use_set_compare(move || dragged_node_id());
 
-        if is_middle_trigger {
-            let last_pos = *last_mouse_pos.read();
-            shift.with_mut(|shift| {
-                *shift += (cur_pos - last_pos).to_point();
-            })
-        } else if is_primary_trigger {
-            let mut resv = CANVAS_DRAG.resolve();
-            resv.with_mut(|drag| {
-                drag.update(cur_pos);
-            })
+    // Difference of the mouse position from the last mouse movement.
+    let drag_diff = use_hook(|| Rc::new(RefCell::new(Vector2D::zero())));
+
+    // Position of the mouse. Used to calculate the shift when shifting the canvas
+    // with middle mouse button. It also is used to calculate offset for being-dragged
+    // nodes.
+    let last_mouse_pos = use_hook(|| Rc::new(RefCell::new(Point2D::zero())));
+    // Track mouse movements, applying changes to the signals where necessary.
+    let drag_diff_clone = Rc::clone(&drag_diff);
+    let mouse_move = move |e: Event<MouseData>| {
+        let drag_diff = drag_diff_clone.clone();
+        let cur_pos = e.page_coordinates().cast_unit();
+        let is_middle = e.held_buttons() == EnumSet::only(MouseButton::Auxiliary);
+        let is_primary = e.held_buttons() == EnumSet::only(MouseButton::Primary);
+
+        let diff = cur_pos - *last_mouse_pos.borrow();
+        drag_diff.replace_with(|v| *v + diff);
+
+        if is_middle {
+            // This shifts the whole canvas view.
+            shift.with_mut(|shift| *shift += diff);
+        } else if is_primary {
+            // This notifies the selected node for which shift is being carried out.
+            // Just overwrite the ID with the same value to trigger the signal.
+            *dragged_node_id.write() = dragged_node_id();
         }
 
-        last_mouse_pos.set(cur_pos);
+        last_mouse_pos.replace(cur_pos);
     };
 
     let mouse_up = move |e: Event<MouseData>| {
@@ -194,7 +186,8 @@ pub fn Canvas() -> Element {
 
         *cursor.write() = "default";
         if is_primary {
-            CanvasDrag::unlink();
+            // Reset the dragged node ID.
+            *dragged_node_id.write() = Id::uninit();
         }
     };
 
@@ -210,13 +203,19 @@ pub fn Canvas() -> Element {
     };
 
     use_effect(move || {
-        if CanvasDrag::has_tracking() {
+        let has_tracking = !dragged_node_id().is_uninit();
+        if has_tracking {
             *cursor.write() = "grabbing";
         }
     });
 
     let dimensions = *dimensions.read();
     let shift = *shift.read();
+    let node_drag_bundle = NodeDragBundle {
+        node_id: dragged_node_id,
+        node_cmp: dragged_node_cmp,
+        diff: drag_diff,
+    };
     rsx! {
         div {
             onmounted: move |cx| div.set(Some(cx.data())),
@@ -230,15 +229,26 @@ pub fn Canvas() -> Element {
             width: "100%",
             height: "100%",
             min_height: "100vh",
+            position: "fixed",
 
-            Grid { grid: GridLines::calc_grid(dimensions), shift }
-            Nodes { shift }
+            Grid { shift, grid: GridLines::calc_grid(dimensions) }
+            Nodes { shift, drag: node_drag_bundle }
         }
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub struct NodeDragBundle {
+    node_id: Signal<Id>,
+    node_cmp: SetCompare<Id>,
+    diff: Rc<RefCell<Vector2D<f64, Pixels>>>,
+}
+
 #[component]
-pub fn Nodes(shift: Shift) -> Element {
+pub fn Nodes(
+    drag: NodeDragBundle,
+    shift: Shift,
+) -> Element {
     let n1 = CfgInner {
         inputs: 0,
         outputs: 1,
@@ -277,42 +287,47 @@ pub fn Nodes(shift: Shift) -> Element {
     let n1 = Cfg {
         cfg: n1,
         offset: off1,
-        orig_z_index: next_z_index(),
+        id: Id::next(),
     };
     let n2 = Cfg {
         cfg: n2,
         offset: off2,
-        orig_z_index: next_z_index(),
+        id: Id::next(),
     };
     let n3 = Cfg {
         cfg: n3,
         offset: off3,
-        orig_z_index: next_z_index(),
+        id: Id::next(),
     };
     let n4 = Cfg {
         cfg: n4,
         offset: off4,
-        orig_z_index: next_z_index(),
+        id: Id::next(),
     };
 
-    let conn1 = CfgInner::connect_pins(&n1, &n2, 0, 0);
+    // let conn1 = LineCfg {
+    //     start: n1.id,
+    //     end: n2.id,
+    //     start_pin: 0,
+    //     end_pin: 0,
+    // };
 
     rsx! {
         div {
-            position: "fixed",
+            position: "relative",
             transform: "{shift}",
 
-            Line { cfg: conn1 }
-
-            Node { cfg: n1 }
-            Node { cfg: n2 }
-            Node { cfg: n3 }
-            Node { cfg: n4 }
+            // Line { cfg: conn1 }
+            // Node { cfg: n1, drag: drag.clone() }
+            // Node { cfg: n2, drag: drag.clone() }
+            // Node { cfg: n3, drag: drag.clone() }
+            // Node { cfg: n4, drag: drag.clone() }
         }
     }
 }
 
-/// Amount of shift applied to the canvas.
+/// Amount of shift applied to the canvas view. This shifts all the elements and the grid
+/// on the specified amount.
 #[derive(Default, Debug, Copy, Clone, PartialEq)]
 pub struct Shift {
     point: Point2D<f64, Pixels>,
@@ -335,7 +350,10 @@ impl Shift {
     }
 
     /// Ensure that this shift is no more than a single cell, wrapping around
-    /// the excess shift.
+    /// the excess shift. Effectively this makes it looks like the grid is being
+    /// shifted continuously, when really we just have the grid wrap around
+    /// by coordinates, so that we don't need to recreate or move actual lines during
+    /// normal shifting.
     pub fn wrap_to_cell(self) -> Self {
         let cell_size = GridLines::CELL_SIZE.to_pixels();
         let x = (self.point.x % cell_size).round();
@@ -356,9 +374,8 @@ impl ops::Add<Point2D<f64, Pixels>> for Shift {
     }
 }
 
-impl ops::AddAssign<Point2D<f64, Pixels>> for Shift {
-    fn add_assign(&mut self, rhs: Point2D<f64, Pixels>) {
-        self.point.x += rhs.x;
-        self.point.y += rhs.y;
+impl ops::AddAssign<Vector2D<f64, Pixels>> for Shift {
+    fn add_assign(&mut self, rhs: Vector2D<f64, Pixels>) {
+        self.point += rhs
     }
 }

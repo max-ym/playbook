@@ -109,7 +109,6 @@ impl Iterator for GridLinesIter {
 #[component]
 pub fn Grid(grid: GridLines, shift: Shift) -> Element {
     let shift = shift.wrap_to_cell();
-
     rsx! {
         div {
             position: "fixed",
@@ -120,6 +119,7 @@ pub fn Grid(grid: GridLines, shift: Shift) -> Element {
             div {
                 position: "relative",
                 transform: "{shift}",
+
                 GridSvg { grid }
             }
         }

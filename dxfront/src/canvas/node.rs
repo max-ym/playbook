@@ -1,126 +1,29 @@
 use core::fmt;
-use std::{
-    borrow::Cow,
-    sync::{OnceLock, RwLock},
-};
+use std::borrow::Cow;
 
 use dioxus::html::{
     geometry::{
         Pixels,
-        euclid::{Length, Point2D, Size2D, Vector2D},
+        euclid::{Length, Point2D, Size2D},
     },
     input_data::MouseButton,
 };
-use hashbrown::HashMap;
+use tracing::debug;
 
-use crate::{
-    canvas::{CanvasDrag, next_z_index},
-    *,
-};
+use crate::*;
 
-use super::{GridUnit, GridUnitConvert};
-
-/// Registry of all line connections on the canvas. Key is an ID of the node by the initial z-index
-/// that was assigned to the node on creation. Signal is used to update the line's end's
-/// position when the node is dragged. Since several lines can be connected to the same node,
-/// the value is a vector of signals.
-static LINE_CONN: RwLock<OnceLock<HashMap<u32, Vec<GlobalSignal<Point2D<f64, Pixels>>>>>> =
-    RwLock::new(OnceLock::new());
-
-/// Manipulation over [LINE_CONN] singleton.
-struct LineConn {
-    pub orig_z_index0: u32,
-    pub signal0: GlobalSignal<Point2D<f64, Pixels>>,
-    pub orig_z_index1: u32,
-    pub signal1: GlobalSignal<Point2D<f64, Pixels>>,
-}
-
-impl LineConn {
-    /// Ensure that the [LINE_CONN] singleton is initialized.
-    /// Execute the closure on initialized singleton and return the result.
-    #[inline]
-    fn ensure_init<T>(
-        f: impl FnOnce(&mut HashMap<u32, Vec<GlobalSignal<Point2D<f64, Pixels>>>>) -> T,
-    ) -> T {
-        let mut lock = LINE_CONN.write().unwrap();
-        lock.get_or_init(HashMap::new);
-        lock.get_mut().map(f).expect("initialized just above")
-    }
-
-    fn to_arr(self) -> [(u32, GlobalSignal<Point2D<f64, Pixels>>); 2] {
-        [
-            (self.orig_z_index0, self.signal0),
-            (self.orig_z_index1, self.signal1),
-        ]
-    }
-
-    /// Register a new line connection with the provided parameters.
-    pub fn register(self) {
-        Self::ensure_init(|map| {
-            for (orig_z_index, signal) in self.to_arr() {
-                map.entry(orig_z_index)
-                    .or_insert_with(Vec::new)
-                    .push(signal);
-            }
-        });
-    }
-
-    /// Unregister all line connections with the provided z-index.
-    /// Needs to be called when the node is being removed from the canvas.
-    pub fn unregister_all(orig_z_index: u32) {
-        Self::ensure_init(|map| {
-            map.remove(&orig_z_index);
-        });
-    }
-
-    /// Unregister a line connection with the provided parameters.
-    /// Needs to be called when the line is being removed from the canvas.
-    ///
-    /// # Panics
-    /// Panics if the line connection does not exist.
-    pub fn unregister(self) {
-        Self::ensure_init(|map| {
-            for (orig_z_index, signal) in self.to_arr() {
-                let signals = map
-                    .get_mut(&orig_z_index)
-                    .expect("orig_z_index should exist");
-                let idx = signals
-                    .iter()
-                    .position(|s| s.signal() == signal.signal())
-                    .expect("signal should exist");
-                signals.swap_remove(idx);
-            }
-        });
-    }
-
-    /// Notify all line connections with the provided z-index about the change in position.
-    pub fn notify_all(orig_z_index: u32, diff: Vector2D<f64, Pixels>) {
-        Self::ensure_init(|map| {
-            if let Some(signals) = map.get(&orig_z_index) {
-                for signal in signals {
-                    signal.with_mut(|pos| {
-                        *pos += diff;
-                    });
-                }
-            }
-        });
-    }
-}
-
-/// Notify listeners about the change in position of a node.
-pub fn notify_moved(orig_z_index: u32, diff: Vector2D<f64, Pixels>) {
-    LineConn::notify_all(orig_z_index, diff);
-}
+use super::{GridUnit, GridUnitConvert, Id, NodeDragBundle};
 
 #[component]
-pub fn Node(cfg: Cfg) -> Element {
-    let orig_z_index = cfg.orig_z_index;
+pub fn Node(cfg: Cfg, drag: NodeDragBundle) -> Element {
+    let orig_z_index: u32 = cfg.id.into();
+    let id = cfg.id;
     let orig_offset = cfg.offset;
-    let cfg = cfg.cfg;
+    let cfg_inner = cfg.cfg;
 
     let mut z_index = use_signal(|| orig_z_index);
+    let mut offset = use_signal(|| orig_offset);
 
-    let offset = use_signal(|| CanvasDrag::new(orig_offset, orig_z_index));
     let mouse_down = move |e: Event<MouseData>| {
         let is_primary = e.data().trigger_button() == Some(MouseButton::Primary);
         if !is_primary {
@@ -128,16 +31,26 @@ pub fn Node(cfg: Cfg) -> Element {
         }
         e.prevent_default();
 
-        *z_index.write() = next_z_index();
-        CanvasDrag::track_new(offset);
+        // Note that we don't really change the ID of this node. We just use ID pool
+        // to generate z-index which is guaranteed to be above all current nodes.
+        *z_index.write() = Id::next().into();
+
+        debug!("Register drag on node {id}");
+        *drag.node_id.write() = id;
     };
 
+    // Update this node each time there's a drag event for it.
+    if use_set_compare_equal(id, drag.node_cmp)() {
+        let diff = *drag.diff.borrow();
+        *offset.write() = offset() + diff;
+    }
+
     // Disconnect all lines when the node is being removed.
-    use_drop(move || {
-        LineConn::unregister_all(orig_z_index);
+    use_drop(move || { 
+        // TODO
     });
 
-    let offset = offset.read().element_offset;
+    let offset = *offset.read();
     rsx! {
         div {
             onmousedown: mouse_down,
@@ -146,7 +59,7 @@ pub fn Node(cfg: Cfg) -> Element {
             position: "absolute",
             top: "{offset.y}px",
             left: "{offset.x}px",
-            NodeUnpositioned { cfg }
+            NodeUnpositioned { cfg: cfg_inner }
         }
     }
 }
@@ -204,32 +117,47 @@ fn Pin(i: u8, is_in: bool, add_top: f64) -> Element {
     }
 }
 
-#[component]
-pub fn Line(cfg: LineCfg) -> Element {
-    let start = *cfg.start.read();
-    let end = *cfg.end.read();
-    let c2 = Point2D::<f64, Pixels>::new(start.x, end.y);
-    let c1 = Point2D::<f64, Pixels>::new(end.x, start.y);
+// #[component]
+// pub fn Line(cfg: LineCfg, drag: NodeDragBundle) -> Element {
+//     let start_node = cfg.start;
+//     let end_node = cfg.end;
 
-    rsx! {
-        div {
-            z_index: u32::MAX,
-            position: "absolute",
-            pointer_events: "none",
+//     // Positions of line start and end, relative to respective nodes.
+//     let start = use_memo(move || {
+//         let start = *sig_a.read();
+//         let rel_start_pos = start_node.cfg.pin_pos(cfg.start_pin);
+//         Point2D::<f64, Pixels>::new(start.x + rel_start_pos.x, start.y + rel_start_pos.y)
+//     });
+//     let end = use_memo(move || {
+//         let end = *sig_b.read();
+//         let rel_end_pos = end_node.cfg.pin_pos(cfg.end_pin);
+//         Point2D::<f64, Pixels>::new(end.x + rel_end_pos.x, end.y + rel_end_pos.y)
+//     });
+//     let start = *start.read();
+//     let end = *end.read();
 
-            svg {
-                overflow: "visible",
-                path {
-                    d: "M {start.x} {start.y} C {c1.x} {c1.y} {c2.x} {c2.y} {end.x} {end.y}",
-                    fill: "none",
-                    stroke: "black",
-                    stroke_width: "2",
-                    opacity: "50%",
-                }
-            }
-        }
-    }
-}
+//     let c2 = Point2D::<f64, Pixels>::new(start.x, end.y);
+//     let c1 = Point2D::<f64, Pixels>::new(end.x, start.y);
+
+//     rsx! {
+//         div {
+//             z_index: u32::MAX,
+//             position: "absolute",
+//             pointer_events: "none",
+
+//             svg {
+//                 overflow: "visible",
+//                 path {
+//                     d: "M {start.x} {start.y} C {c1.x} {c1.y} {c2.x} {c2.y} {end.x} {end.y}",
+//                     fill: "none",
+//                     stroke: "black",
+//                     stroke_width: "2",
+//                     opacity: "50%",
+//                 }
+//             }
+//         }
+//     }
+// }
 
 /// Configuration of inner node properties.
 #[derive(Debug, Clone, PartialEq, Props)]
@@ -247,7 +175,7 @@ pub struct CfgInner {
 pub struct Cfg {
     pub cfg: CfgInner,
     pub offset: Point2D<f64, Pixels>,
-    pub orig_z_index: u32,
+    pub id: Id,
 }
 
 impl CfgInner {
@@ -265,7 +193,15 @@ impl CfgInner {
         let pins_on_side = self.inputs.max(self.outputs);
         let pin_size = Self::min_height_for_cnt(pins_on_side) + Self::OUTER_MARGIN * 2.0;
 
-        Size2D::new(min_w, min_h.max(pin_size))
+        Size2D::new(min_w, min_h.max(pin_size).round())
+    }
+
+    /// Minimum size selected ceiled to the grid unit.
+    pub fn min_size_to_grid(&self) -> Size2D<f64, Pixels> {
+        let size = self.min_size();
+        let h = size.height + (GridUnit::F + size.height as f64 % GridUnit::F);
+        let w = size.width + (GridUnit::F + size.width as f64 % GridUnit::F);
+        Size2D::new(w.round(), h.round())
     }
 
     fn min_height_for_cnt(pins: u8) -> f64 {
@@ -276,49 +212,59 @@ impl CfgInner {
         }
     }
 
+    fn actual_size(&self) -> Size2D<f64, Pixels> {
+        Self::min_size_to_grid(&self)
+    }
+
     /// The amount to offset the one kind of pins from the top to center relative to the
     /// other kind of pins.
     pub fn offset_pins(&self) -> (f64, f64) {
-        let inputs = Self::min_height_for_cnt(self.inputs);
-        let outputs = Self::min_height_for_cnt(self.outputs);
+        let size = self.actual_size();
+        let min_size = self.min_size();
 
-        if self.inputs < self.outputs {
-            let diff = outputs - inputs;
-            (diff / 2.0, 0.0)
-        } else {
-            let diff = inputs - outputs;
-            (0.0, diff / 2.0)
-        }
+        let outputs_h = Self::min_height_for_cnt(self.outputs);
+        let inputs_h = Self::min_height_for_cnt(self.inputs);
+        let middle_h = size.height / 2.0;
+
+        // Offset from the top for pins on the side that has the most pins.
+        // This is to correct for grid-snapping the size of the node, which
+        // may shift the pins from the top a bit.
+        let offset_top = size.height - min_size.height;
+
+        (
+            offset_top + middle_h - inputs_h,
+            offset_top + middle_h - outputs_h,
+        )
     }
 
-    pub fn connect_pins(a: &Cfg, b: &Cfg, p1: u8, p2: u8) -> LineCfg {
-        let a_pos = a.cfg.pin_pos(p1);
-        let b_pos = b.cfg.pin_pos(p2);
+    // pub fn connect_pins(a: &Cfg, b: &Cfg, p1: u8, p2: u8) -> LineCfg {
+    //     let a_pos = a.cfg.pin_pos(p1);
+    //     let b_pos = b.cfg.pin_pos(p2);
 
-        let start = Point2D::new(a_pos.x + a.offset.x, a_pos.y + a.offset.y);
-        let end = Point2D::new(b_pos.x + b.offset.x, b_pos.y + b.offset.y);
+    //     let start = Point2D::new(a_pos.x + a.offset.x, a_pos.y + a.offset.y);
+    //     let end = Point2D::new(b_pos.x + b.offset.x, b_pos.y + b.offset.y);
 
-        let signal0 = Signal::global(Point2D::zero);
-        let signal1 = Signal::global(Point2D::zero);
+    //     let signal0 = Signal::global(Point2D::zero);
+    //     let signal1 = Signal::global(Point2D::zero);
 
-        *signal0.write() = start;
-        *signal1.write() = end;
+    //     *signal0.write() = start;
+    //     *signal1.write() = end;
 
-        let line_cfg = LineCfg {
-            start: signal0.signal(),
-            end: signal1.signal(),
-        };
+    //     let line_cfg = LineCfg {
+    //         start: signal0.signal(),
+    //         end: signal1.signal(),
+    //     };
 
-        LineConn {
-            orig_z_index0: a.orig_z_index,
-            signal0,
-            orig_z_index1: b.orig_z_index,
-            signal1,
-        }
-        .register();
+    //     LineConn {
+    //         orig_z_index0: a.orig_z_index,
+    //         signal0,
+    //         orig_z_index1: b.orig_z_index,
+    //         signal1,
+    //     }
+    //     .register();
 
-        line_cfg
-    }
+    //     line_cfg
+    // }
 
     pub fn pin_pos(&self, i: u8) -> Point2D<f64, Pixels> {
         let sum = self.inputs + self.outputs;
@@ -394,6 +340,8 @@ impl fmt::Display for Class {
 /// A configuration for a line that connects two node pins.
 #[derive(Debug, Clone, PartialEq, Props)]
 pub struct LineCfg {
-    start: Signal<Point2D<f64, Pixels>>,
-    end: Signal<Point2D<f64, Pixels>>,
+    pub start: Cfg,
+    pub start_pin: u8,
+    pub end: Cfg,
+    pub end_pin: u8,
 }
