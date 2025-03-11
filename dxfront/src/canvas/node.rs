@@ -8,58 +8,35 @@ use dioxus::html::{
     },
     input_data::MouseButton,
 };
-use tracing::debug;
 
 use crate::*;
 
-use super::{GridUnit, GridUnitConvert, Id, NodeDragBundle};
+use super::{GridUnit, GridUnitConvert, Id, NodeDragNotify};
 
 #[component]
-pub fn Node(cfg: Cfg, drag: NodeDragBundle) -> Element {
-    let orig_z_index: u32 = cfg.id.into();
+pub fn Node(cfg: Cfg, drag: NodeDragNotify) -> Element {
     let id = cfg.id;
-    let orig_offset = cfg.offset;
-    let cfg_inner = cfg.cfg;
+    let offset = cfg.offset;
+    let z_index = cfg.z_index;
 
-    let mut z_index = use_signal(|| orig_z_index);
-    let mut offset = use_signal(|| orig_offset);
-
-    let mouse_down = move |e: Event<MouseData>| {
+    let onmousedown = move |e: Event<MouseData>| {
         let is_primary = e.data().trigger_button() == Some(MouseButton::Primary);
         if !is_primary {
             return;
         }
+
         e.prevent_default();
-
-        // Note that we don't really change the ID of this node. We just use ID pool
-        // to generate z-index which is guaranteed to be above all current nodes.
-        *z_index.write() = Id::next().into();
-
-        debug!("Register drag on node {id}");
-        *drag.node_id.write() = id;
+        drag.notify_mouse_down(id);
     };
 
-    // Update this node each time there's a drag event for it.
-    if use_set_compare_equal(id, drag.node_cmp)() {
-        let diff = *drag.diff.borrow();
-        *offset.write() = offset() + diff;
-    }
-
-    // Disconnect all lines when the node is being removed.
-    use_drop(move || { 
-        // TODO
-    });
-
-    let offset = *offset.read();
     rsx! {
         div {
-            onmousedown: mouse_down,
-
-            z_index: z_index,
+            onmousedown,
+            z_index,
             position: "absolute",
             top: "{offset.y}px",
             left: "{offset.x}px",
-            NodeUnpositioned { cfg: cfg_inner }
+            NodeUnpositioned { cfg: cfg.cfg }
         }
     }
 }
@@ -97,8 +74,7 @@ pub fn NodeUnpositioned(cfg: CfgInner) -> Element {
 
 #[component]
 fn Pin(i: u8, is_in: bool, add_top: f64) -> Element {
-    let top =
-        i as f64 * CfgInner::PIN_SIZE + i as f64 * CfgInner::PIN_MARGIN + CfgInner::OUTER_MARGIN;
+    let top = i as f64 * (CfgInner::PIN_SIZE + CfgInner::PIN_MARGIN);
     let top = top + add_top;
     let side = -CfgInner::PIN_SIZE / 2.0;
     let padding: f64 = CfgInner::PIN_SIZE;
@@ -176,6 +152,7 @@ pub struct Cfg {
     pub cfg: CfgInner,
     pub offset: Point2D<f64, Pixels>,
     pub id: Id,
+    pub z_index: u32,
 }
 
 impl CfgInner {
@@ -184,23 +161,37 @@ impl CfgInner {
 
     pub const PIN_SIZE: f64 = 16.0;
     pub const PIN_MARGIN: f64 = 16.0;
-    pub const OUTER_MARGIN: f64 = 12.0;
+    pub const OUTER_MARGIN: f64 = 8.0;
 
     pub fn min_size(&self) -> Size2D<f64, Pixels> {
         let min_w = Self::MIN_W.to_pixels();
         let min_h = Self::MIN_H.to_pixels();
 
-        let pins_on_side = self.inputs.max(self.outputs);
-        let pin_size = Self::min_height_for_cnt(pins_on_side) + Self::OUTER_MARGIN * 2.0;
+        let pins_on_bigger_side = self.inputs.max(self.outputs);
+        let pin_h = Self::min_height_for_cnt(pins_on_bigger_side) + Self::OUTER_MARGIN * 2.0;
 
-        Size2D::new(min_w, min_h.max(pin_size).round())
+        Size2D::new(min_w, min_h.max(pin_h).round())
     }
 
     /// Minimum size selected ceiled to the grid unit.
     pub fn min_size_to_grid(&self) -> Size2D<f64, Pixels> {
         let size = self.min_size();
-        let h = size.height + (GridUnit::F + size.height as f64 % GridUnit::F);
-        let w = size.width + (GridUnit::F + size.width as f64 % GridUnit::F);
+
+        let rem_h = (size.height as f64 % GridUnit::F).round();
+        let rem_w = (size.width as f64 % GridUnit::F).round();
+        let add_h = if rem_h > 0.0 {
+            GridUnit::F - rem_h
+        } else {
+            0.0
+        };
+        let add_w = if rem_w > 0.0 {
+            GridUnit::F - rem_w
+        } else {
+            0.0
+        };
+
+        let h = size.height + add_h;
+        let w = size.width + add_w;
         Size2D::new(w.round(), h.round())
     }
 
@@ -220,20 +211,13 @@ impl CfgInner {
     /// other kind of pins.
     pub fn offset_pins(&self) -> (f64, f64) {
         let size = self.actual_size();
-        let min_size = self.min_size();
 
         let outputs_h = Self::min_height_for_cnt(self.outputs);
         let inputs_h = Self::min_height_for_cnt(self.inputs);
-        let middle_h = size.height / 2.0;
-
-        // Offset from the top for pins on the side that has the most pins.
-        // This is to correct for grid-snapping the size of the node, which
-        // may shift the pins from the top a bit.
-        let offset_top = size.height - min_size.height;
 
         (
-            offset_top + middle_h - inputs_h,
-            offset_top + middle_h - outputs_h,
+            (size.height - inputs_h) / 2.0,
+            (size.height - outputs_h) / 2.0,
         )
     }
 
@@ -276,8 +260,8 @@ impl CfgInner {
         let pin_center = Self::PIN_SIZE / 2.0;
 
         let offset = self.offset_pins();
-        let top = i as f64 * Self::PIN_SIZE + i as f64 * Self::PIN_MARGIN + Self::OUTER_MARGIN;
-        let top = top + pin_center + if is_in { offset.0 } else { offset.1 };
+        let top = i as f64 * (Self::PIN_SIZE + Self::PIN_MARGIN);
+        let top = Self::OUTER_MARGIN + top + pin_center + if is_in { offset.0 } else { offset.1 };
 
         let side = if is_in {
             -pin_center

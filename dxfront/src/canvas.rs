@@ -24,7 +24,7 @@ use grid::*;
 mod node;
 use hashbrown::HashMap;
 use node::*;
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Pool of IDs to uniquely identify new elements being added to the canvas.
 /// IDs start from 1.
@@ -49,8 +49,13 @@ impl Id {
     /// New nodes added to the canvas get their IDs as z-indexes.
     /// This effectively allows for new nodes to be on top of the older ones
     /// after they are added.
-    fn next() -> Self {
+    pub fn next() -> Self {
         let id = NEXT_ID.0.fetch_add(1, atomic::Ordering::AcqRel);
+        Self(id)
+    }
+
+    pub fn latest() -> Self {
+        let id = NEXT_ID.0.load(atomic::Ordering::Acquire);
         Self(id)
     }
 
@@ -147,38 +152,49 @@ pub fn Canvas() -> Element {
         }
     };
 
+    let mut nodes = use_signal(dummy_nodes);
+
     // Tracking of the selected node for drag.
     let mut dragged_node_id = use_signal(Id::uninit);
-    let dragged_node_cmp = use_set_compare(move || dragged_node_id());
-
-    // Difference of the mouse position from the last mouse movement.
-    let drag_diff = use_hook(|| Rc::new(RefCell::new(Vector2D::zero())));
 
     // Position of the mouse. Used to calculate the shift when shifting the canvas
     // with middle mouse button. It also is used to calculate offset for being-dragged
     // nodes.
     let last_mouse_pos = use_hook(|| Rc::new(RefCell::new(Point2D::zero())));
     // Track mouse movements, applying changes to the signals where necessary.
-    let drag_diff_clone = Rc::clone(&drag_diff);
     let mouse_move = move |e: Event<MouseData>| {
-        let drag_diff = drag_diff_clone.clone();
         let cur_pos = e.page_coordinates().cast_unit();
         let is_middle = e.held_buttons() == EnumSet::only(MouseButton::Auxiliary);
         let is_primary = e.held_buttons() == EnumSet::only(MouseButton::Primary);
 
         let diff = cur_pos - *last_mouse_pos.borrow();
-        drag_diff.replace_with(|v| *v + diff);
+        last_mouse_pos.replace(cur_pos);
 
         if is_middle {
             // This shifts the whole canvas view.
             shift.with_mut(|shift| *shift += diff);
         } else if is_primary {
-            // This notifies the selected node for which shift is being carried out.
-            // Just overwrite the ID with the same value to trigger the signal.
-            *dragged_node_id.write() = dragged_node_id();
-        }
+            // This moves the dragged node.
+            let node_id = dragged_node_id();
+            if let Some(node_id) = node_id.only_valid() {
+                nodes.with_mut(|nodes| {
+                    if let Some(node) = nodes.get_mut(&node_id) {
+                        node.offset += diff;
 
-        last_mouse_pos.replace(cur_pos);
+                        // Check whether to update z-index to put the node on top.
+                        if node.z_index != u32::from(Id::latest()) {
+                            // Note that we don't really change the ID of this node.
+                            // We just use ID pool
+                            // to generate z-index which is guaranteed to be
+                            // above all current nodes.
+                            node.z_index = Id::next().into();
+                        }
+                    } else {
+                        error!("Node with ID {node_id} not found for move in the nodes map.");
+                    }
+                });
+            }
+        }
     };
 
     let mouse_up = move |e: Event<MouseData>| {
@@ -187,7 +203,7 @@ pub fn Canvas() -> Element {
         *cursor.write() = "default";
         if is_primary {
             // Reset the dragged node ID.
-            *dragged_node_id.write() = Id::uninit();
+            dragged_node_id.replace(Id::uninit());
         }
     };
 
@@ -211,10 +227,8 @@ pub fn Canvas() -> Element {
 
     let dimensions = *dimensions.read();
     let shift = *shift.read();
-    let node_drag_bundle = NodeDragBundle {
+    let node_drag_notify = NodeDragNotify {
         node_id: dragged_node_id,
-        node_cmp: dragged_node_cmp,
-        diff: drag_diff,
     };
     rsx! {
         div {
@@ -232,23 +246,34 @@ pub fn Canvas() -> Element {
             position: "fixed",
 
             Grid { shift, grid: GridLines::calc_grid(dimensions) }
-            Nodes { shift, drag: node_drag_bundle }
+            div {
+                position: "relative",
+                transform: "{shift}",
+
+                // Line { cfg: conn1 }
+                for (_, cfg) in nodes() {
+                    Node { cfg, drag: node_drag_notify.clone() }
+                }
+            }
         }
     }
 }
 
+/// Send the selected node ID to the parent component.
 #[derive(Clone, PartialEq)]
-pub struct NodeDragBundle {
+struct NodeDragNotify {
     node_id: Signal<Id>,
-    node_cmp: SetCompare<Id>,
-    diff: Rc<RefCell<Vector2D<f64, Pixels>>>,
 }
 
-#[component]
-pub fn Nodes(
-    drag: NodeDragBundle,
-    shift: Shift,
-) -> Element {
+impl NodeDragNotify {
+    pub fn notify_mouse_down(&mut self, id: Id) {
+        debug!("Register drag on node {id}");
+        *self.node_id.write() = id;
+    }
+}
+
+/// For testing, for now.
+fn dummy_nodes() -> HashMap<Id, node::Cfg> {
     let n1 = CfgInner {
         inputs: 0,
         outputs: 1,
@@ -288,23 +313,37 @@ pub fn Nodes(
         cfg: n1,
         offset: off1,
         id: Id::next(),
+        z_index: Id::next().into(),
     };
     let n2 = Cfg {
         cfg: n2,
         offset: off2,
         id: Id::next(),
+        z_index: Id::next().into(),
     };
     let n3 = Cfg {
         cfg: n3,
         offset: off3,
         id: Id::next(),
+        z_index: Id::next().into(),
     };
     let n4 = Cfg {
         cfg: n4,
         offset: off4,
         id: Id::next(),
+        z_index: Id::next().into(),
     };
 
+    let mut m = HashMap::with_capacity(4);
+    m.insert(n1.id, n1);
+    m.insert(n2.id, n2);
+    m.insert(n3.id, n3);
+    m.insert(n4.id, n4);
+    m
+}
+
+#[component]
+pub fn Nodes(drag: NodeDragNotify, shift: Shift) -> Element {
     // let conn1 = LineCfg {
     //     start: n1.id,
     //     end: n2.id,
@@ -312,18 +351,7 @@ pub fn Nodes(
     //     end_pin: 0,
     // };
 
-    rsx! {
-        div {
-            position: "relative",
-            transform: "{shift}",
-
-            // Line { cfg: conn1 }
-            // Node { cfg: n1, drag: drag.clone() }
-            // Node { cfg: n2, drag: drag.clone() }
-            // Node { cfg: n3, drag: drag.clone() }
-            // Node { cfg: n4, drag: drag.clone() }
-        }
-    }
+    rsx! {}
 }
 
 /// Amount of shift applied to the canvas view. This shifts all the elements and the grid
