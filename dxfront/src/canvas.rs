@@ -1,6 +1,7 @@
 use crate::*;
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     fmt, ops,
     sync::{
         OnceLock, RwLock,
@@ -24,6 +25,7 @@ use grid::*;
 mod node;
 use hashbrown::HashMap;
 use node::*;
+use smallvec::{SmallVec, smallvec};
 use tracing::{debug, error};
 
 /// Pool of IDs to uniquely identify new elements being added to the canvas.
@@ -32,7 +34,7 @@ use tracing::{debug, error};
 static NEXT_ID: AtomicId = AtomicId::one();
 
 /// ID of the node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
 struct Id(u32);
 
 #[derive(Debug)]
@@ -152,7 +154,42 @@ pub fn Canvas() -> Element {
         }
     };
 
+    // All nodes on the canvas.
     let mut nodes = use_signal(dummy_nodes);
+
+    // Array with changed nodes for which the related resources (like lines) should be
+    // updated.
+    let nodes_changed = use_hook(|| Rc::new(RefCell::new(Vec::<Id>::with_capacity(1))));
+
+    // All node-connecting lines on the canvas.
+    let lines = use_hook(|| Rc::new(RefCell::new(LineCtrl::from_lines(dummy_lines(&nodes())))));
+
+    // Recalculate lines when node changes.
+    let use_nodes_changed = Rc::clone(&nodes_changed);
+    let use_lines = Rc::clone(&lines);
+    use_memo(move || {
+        let nodes_changed = &use_nodes_changed;
+        let lines = &use_lines;
+        let nodes = nodes();
+
+        for &id in nodes_changed.borrow().iter() {
+            if let Some(node) = nodes.get(&id) {
+                lines.borrow_mut().each_line_mut(node.id, |line, line_id| {
+                    *line = NodeLineCalc {
+                        start: nodes[&line_id.a.id].clone(),
+                        end: nodes[&line_id.b.id].clone(),
+                        start_pin: line_id.a.index,
+                        end_pin: line_id.b.index,
+                    }
+                    .calc();
+                });
+            } else {
+                error!("Node with ID {id} not found for line recalculation in the nodes map.");
+            }
+        }
+
+        nodes_changed.borrow_mut().clear();
+    });
 
     // Tracking of the selected node for drag.
     let mut dragged_node_id = use_signal(Id::uninit);
@@ -177,6 +214,7 @@ pub fn Canvas() -> Element {
             // This moves the dragged node.
             let node_id = dragged_node_id();
             if let Some(node_id) = node_id.only_valid() {
+                nodes_changed.borrow_mut().push(node_id);
                 nodes.with_mut(|nodes| {
                     if let Some(node) = nodes.get_mut(&node_id) {
                         node.offset += diff;
@@ -250,9 +288,12 @@ pub fn Canvas() -> Element {
                 position: "relative",
                 transform: "{shift}",
 
-                // Line { cfg: conn1 }
                 for (_, cfg) in nodes() {
                     Node { cfg, drag: node_drag_notify.clone() }
+                }
+
+                for cfg in lines.borrow().lines().cloned() {
+                    Line { cfg }
                 }
             }
         }
@@ -342,16 +383,91 @@ fn dummy_nodes() -> HashMap<Id, node::Cfg> {
     m
 }
 
-#[component]
-pub fn Nodes(drag: NodeDragNotify, shift: Shift) -> Element {
-    // let conn1 = LineCfg {
-    //     start: n1.id,
-    //     end: n2.id,
-    //     start_pin: 0,
-    //     end_pin: 0,
-    // };
+fn dummy_lines(nodes: &HashMap<Id, node::Cfg>) -> HashMap<LineId, LineCfg> {
+    let mut m = HashMap::with_capacity(1);
+    let conn1 = LineId {
+        a: NodePinId {
+            id: Id(1),
+            index: 0,
+        },
+        b: NodePinId {
+            id: Id(3),
+            index: 1,
+        },
+    };
+    let calc1 = NodeLineCalc {
+        start: nodes.get(&conn1.a.id).cloned().unwrap(),
+        end: nodes.get(&conn1.b.id).cloned().unwrap(),
+        start_pin: conn1.a.index,
+        end_pin: conn1.b.index,
+    };
+    m.insert(conn1, calc1.into());
+    m
+}
 
-    rsx! {}
+/// Controller for the lines connecting the nodes.
+#[derive(Debug)]
+pub struct LineCtrl {
+    map: BTreeMap<NodePinId, SmallVec<[LineId; 1]>>,
+    lines: HashMap<LineId, LineCfg>,
+}
+
+impl LineCtrl {
+    /// Create a new line manager from the lines map.
+    pub fn from_lines(lines: HashMap<LineId, LineCfg>) -> Self {
+        let mut map = BTreeMap::new();
+        for &id in lines.keys() {
+            map.entry(id.a).or_insert_with(SmallVec::new).push(id);
+            map.entry(id.b).or_insert_with(SmallVec::new).push(id);
+        }
+
+        Self { map, lines }
+    }
+
+    /// Iterate over all lines for a given node.
+    pub fn node_line_ids(&self, node: Id) -> impl Iterator<Item = LineId> {
+        let min = NodePinId { id: node, index: 0 };
+        let max = NodePinId {
+            id: node,
+            index: u8::MAX,
+        };
+        self.map
+            .range(min..=max)
+            .flat_map(|(_, v)| v.iter().copied())
+    }
+
+    /// Execute a function for each line connected to the node.
+    pub fn each_line_mut(&mut self, node: Id, mut f: impl FnMut(&mut LineCfg, LineId)) {
+        let mut lines = std::mem::take(&mut self.lines);
+        for id in self.node_line_ids(node) {
+            let l = lines
+                .get_mut(&id)
+                .expect("line should be present in correct state line controller");
+            f(l, id);
+        }
+        self.lines = lines;
+    }
+
+    pub fn lines(&self) -> impl Iterator<Item = &LineCfg> {
+        self.lines.values()
+    }
+}
+
+/// Identifier for node pin.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq)]
+pub struct NodePinId {
+    /// Node ID.
+    pub id: Id,
+
+    /// Pin index.
+    pub index: u8,
+}
+
+/// Identifier for line.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Hash, Eq)]
+pub struct LineId {
+    pub a: NodePinId,
+    pub b: NodePinId,
 }
 
 /// Amount of shift applied to the canvas view. This shifts all the elements and the grid

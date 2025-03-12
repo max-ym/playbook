@@ -15,6 +15,7 @@ log = "0.4"
 tracing-log = "0.2"
 
 hashbrown = "0.15"
+smallvec = { version = "1.13", features = ["union", "const_generics"] }
 
 [features]
 default = ["web"]

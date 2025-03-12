@@ -93,47 +93,32 @@ fn Pin(i: u8, is_in: bool, add_top: f64) -> Element {
     }
 }
 
-// #[component]
-// pub fn Line(cfg: LineCfg, drag: NodeDragBundle) -> Element {
-//     let start_node = cfg.start;
-//     let end_node = cfg.end;
+#[component]
+pub fn Line(cfg: LineCfg) -> Element {
+    let start = cfg.pos0;
+    let end = cfg.pos1;
+    let c2 = Point2D::<f64, Pixels>::new(start.x, end.y);
+    let c1 = Point2D::<f64, Pixels>::new(end.x, start.y);
 
-//     // Positions of line start and end, relative to respective nodes.
-//     let start = use_memo(move || {
-//         let start = *sig_a.read();
-//         let rel_start_pos = start_node.cfg.pin_pos(cfg.start_pin);
-//         Point2D::<f64, Pixels>::new(start.x + rel_start_pos.x, start.y + rel_start_pos.y)
-//     });
-//     let end = use_memo(move || {
-//         let end = *sig_b.read();
-//         let rel_end_pos = end_node.cfg.pin_pos(cfg.end_pin);
-//         Point2D::<f64, Pixels>::new(end.x + rel_end_pos.x, end.y + rel_end_pos.y)
-//     });
-//     let start = *start.read();
-//     let end = *end.read();
+    rsx! {
+        div {
+            z_index: u32::MAX,
+            position: "absolute",
+            pointer_events: "none",
 
-//     let c2 = Point2D::<f64, Pixels>::new(start.x, end.y);
-//     let c1 = Point2D::<f64, Pixels>::new(end.x, start.y);
-
-//     rsx! {
-//         div {
-//             z_index: u32::MAX,
-//             position: "absolute",
-//             pointer_events: "none",
-
-//             svg {
-//                 overflow: "visible",
-//                 path {
-//                     d: "M {start.x} {start.y} C {c1.x} {c1.y} {c2.x} {c2.y} {end.x} {end.y}",
-//                     fill: "none",
-//                     stroke: "black",
-//                     stroke_width: "2",
-//                     opacity: "50%",
-//                 }
-//             }
-//         }
-//     }
-// }
+            svg {
+                overflow: "visible",
+                path {
+                    d: "M {start.x} {start.y} C {c1.x} {c1.y} {c2.x} {c2.y} {end.x} {end.y}",
+                    fill: "none",
+                    stroke: "black",
+                    stroke_width: "2",
+                    opacity: "50%",
+                }
+            }
+        }
+    }
+}
 
 /// Configuration of inner node properties.
 #[derive(Debug, Clone, PartialEq, Props)]
@@ -321,11 +306,43 @@ impl fmt::Display for Class {
     }
 }
 
+/// Configuration for calculating line parameters that connects node pins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeLineCalc {
+    /// Start node.
+    pub start: Cfg,
+
+    /// Pin number in the start node.
+    pub start_pin: u8,
+
+    /// End node.
+    pub end: Cfg,
+
+    /// Pin number in the end node.
+    pub end_pin: u8,
+}
+
 /// A configuration for a line that connects two node pins.
 #[derive(Debug, Clone, PartialEq, Props)]
 pub struct LineCfg {
-    pub start: Cfg,
-    pub start_pin: u8,
-    pub end: Cfg,
-    pub end_pin: u8,
+    pub pos0: Point2D<f64, Pixels>,
+    pub pos1: Point2D<f64, Pixels>,
 }
+
+impl NodeLineCalc {
+    pub fn calc(self) -> LineCfg {
+        let start = self.start.cfg.pin_pos(self.start_pin);
+        let end = self.end.cfg.pin_pos(self.end_pin);
+
+        LineCfg {
+            pos0: Point2D::new(start.x + self.start.offset.x, start.y + self.start.offset.y),
+            pos1: Point2D::new(end.x + self.end.offset.x, end.y + self.end.offset.y),
+        }
+    }
+}
+
+impl From<NodeLineCalc> for LineCfg {
+    fn from(calc: NodeLineCalc) -> Self {
+        calc.calc()
+    }
+} 
