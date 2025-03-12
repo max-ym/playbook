@@ -384,7 +384,7 @@ fn dummy_nodes() -> HashMap<Id, node::Cfg> {
 }
 
 fn dummy_lines(nodes: &HashMap<Id, node::Cfg>) -> HashMap<LineId, LineCfg> {
-    let mut m = HashMap::with_capacity(1);
+    let mut m = HashMap::with_capacity(2);
     let conn1 = LineId {
         a: NodePinId {
             id: Id(1),
@@ -401,7 +401,24 @@ fn dummy_lines(nodes: &HashMap<Id, node::Cfg>) -> HashMap<LineId, LineCfg> {
         start_pin: conn1.a.index,
         end_pin: conn1.b.index,
     };
+    let conn2 = LineId {
+        a: NodePinId {
+            id: Id(3),
+            index: 3,
+        },
+        b: NodePinId {
+            id: Id(5),
+            index: 0,
+        },
+    };
+    let calc2 = NodeLineCalc {
+        start: nodes.get(&conn2.a.id).cloned().unwrap(),
+        end: nodes.get(&conn2.b.id).cloned().unwrap(),
+        start_pin: conn2.a.index,
+        end_pin: conn2.b.index,
+    };
     m.insert(conn1, calc1.into());
+    m.insert(conn2, calc2.into());
     m
 }
 

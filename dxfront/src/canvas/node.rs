@@ -113,7 +113,7 @@ pub fn Line(cfg: LineCfg) -> Element {
                     fill: "none",
                     stroke: "black",
                     stroke_width: "2",
-                    opacity: "50%",
+                    opacity: "40%",
                 }
             }
         }
@@ -235,7 +235,8 @@ impl CfgInner {
     //     line_cfg
     // }
 
-    pub fn pin_pos(&self, i: u8) -> Point2D<f64, Pixels> {
+    /// Position of the line for the pin with the given index.
+    pub fn pin_line_pos(&self, i: u8) -> Point2D<f64, Pixels> {
         let sum = self.inputs + self.outputs;
         assert!(i < sum, "Pin index out of bounds");
 
@@ -246,12 +247,17 @@ impl CfgInner {
 
         let offset = self.offset_pins();
         let top = i as f64 * (Self::PIN_SIZE + Self::PIN_MARGIN);
-        let top = Self::OUTER_MARGIN + top + pin_center + if is_in { offset.0 } else { offset.1 };
+        let top = pin_center + top + if is_in { offset.0 } else { offset.1 };
 
+        // TODO can we compile with CSS value directly?
+        const BORDER_MARGIN: f64 = 4.0;
+
+        // Since pins should be centered relative to the node's edge, we shift
+        // them by half of the pin size.
         let side = if is_in {
             -pin_center
         } else {
-            Self::MIN_W.to_pixels() + pin_center
+            Self::MIN_W.to_pixels() + pin_center + BORDER_MARGIN
         };
 
         Point2D::new(side, top)
@@ -331,8 +337,8 @@ pub struct LineCfg {
 
 impl NodeLineCalc {
     pub fn calc(self) -> LineCfg {
-        let start = self.start.cfg.pin_pos(self.start_pin);
-        let end = self.end.cfg.pin_pos(self.end_pin);
+        let start = self.start.cfg.pin_line_pos(self.start_pin);
+        let end = self.end.cfg.pin_line_pos(self.end_pin);
 
         LineCfg {
             pos0: Point2D::new(start.x + self.start.offset.x, start.y + self.start.offset.y),
@@ -345,4 +351,4 @@ impl From<NodeLineCalc> for LineCfg {
     fn from(calc: NodeLineCalc) -> Self {
         calc.calc()
     }
-} 
+}
